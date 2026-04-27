@@ -211,6 +211,19 @@ impl AnthropicClient {
         self
     }
 
+    /// Replace the internal HTTP client with one that respects the given
+    /// timeout configuration. This controls connect and request-level
+    /// timeouts for all outbound API calls.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: &crate::http_client::TimeoutConfig) -> Self {
+        self.http = crate::http_client::build_http_client_with_opts(
+            &crate::http_client::ProxyConfig::from_env(),
+            timeout,
+        )
+        .unwrap_or_else(|_| reqwest::Client::new());
+        self
+    }
+
     #[must_use]
     pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
         self.session_tracer = Some(session_tracer);
@@ -454,7 +467,12 @@ impl AnthropicClient {
                 break;
             }
 
-            tokio::time::sleep(self.jittered_backoff_for_attempt(attempts)?).await;
+            let delay = if let Some(retry_after) = last_error.as_ref().and_then(|e| e.retry_after()) {
+                retry_after
+            } else {
+                self.jittered_backoff_for_attempt(attempts)?
+            };
+            tokio::time::sleep(delay).await;
         }
 
         Err(ApiError::RetriesExhausted {
@@ -866,10 +884,12 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         return Ok(response);
     }
 
-    let request_id = request_id_from_headers(response.headers());
+    let headers = response.headers().clone();
+    let request_id = request_id_from_headers(&headers);
     let body = response.text().await.unwrap_or_else(|_| String::new());
     let parsed_error = serde_json::from_str::<AnthropicErrorEnvelope>(&body).ok();
     let retryable = is_retryable_status(status);
+    let retry_after = parse_retry_after(&headers, status);
 
     Err(ApiError::Api {
         status,
@@ -883,7 +903,19 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         body,
         retryable,
         suggested_action: None,
+        retry_after,
     })
+}
+
+fn parse_retry_after(headers: &reqwest::header::HeaderMap, status: reqwest::StatusCode) -> Option<std::time::Duration> {
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
 }
 
 const fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -908,6 +940,8 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
         body,
         retryable,
         suggested_action,
+        retry_after,
+        ..
     } = error
     else {
         return error;
@@ -921,6 +955,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
             body,
             retryable,
             suggested_action,
+            retry_after,
         };
     }
     let Some(bearer_token) = auth.bearer_token() else {
@@ -932,6 +967,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
             body,
             retryable,
             suggested_action,
+            retry_after,
         };
     };
     if !bearer_token.starts_with("sk-ant-") {
@@ -943,6 +979,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
             body,
             retryable,
             suggested_action,
+            retry_after,
         };
     }
     // Only append the hint when the AuthSource is pure BearerToken. If both
@@ -958,6 +995,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
             body,
             retryable,
             suggested_action,
+            retry_after,
         };
     }
     let enriched_message = match message {
@@ -972,6 +1010,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
         body,
         retryable,
         suggested_action,
+        retry_after,
     }
 }
 
@@ -1596,6 +1635,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when
@@ -1637,6 +1677,7 @@ mod tests {
             body: String::new(),
             retryable: true,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when
@@ -1666,6 +1707,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when
@@ -1694,6 +1736,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when
@@ -1719,6 +1762,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when
