@@ -612,6 +612,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         assert!(error.is_context_window_failure());
