@@ -67,6 +67,8 @@ use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
+include!(concat!(env!("OUT_DIR"), "/locale_catalog.rs"));
+
 const DEFAULT_MODEL: &str = "anthropic/claude-opus-4-6";
 
 /// #148: Model provenance for `claw status` JSON/text output. Records where
@@ -205,6 +207,44 @@ type RuntimePluginStateBuildOutput = (
     Option<Arc<Mutex<RuntimeMcpState>>>,
     Vec<RuntimeToolDefinition>,
 );
+
+fn cli_text(key: &str) -> &'static str {
+    let locale = cli_locale();
+    cli_locale_text(&locale, key)
+        .or_else(|| cli_locale_text("en", key))
+        .unwrap_or("")
+}
+
+fn cli_locale() -> String {
+    env::var("CLAW_UI_LANG")
+        .or_else(|_| env::var("CLAW_LANG"))
+        .or_else(|_| env::var("LANG"))
+        .ok()
+        .as_deref()
+        .map(normalize_cli_locale)
+        .unwrap_or_else(|| "en".to_string())
+}
+
+fn normalize_cli_locale(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.split('-').next().unwrap_or("en") {
+        "ua" => "uk".to_string(),
+        "" | "c" | "posix" => "en".to_string(),
+        language => language.to_string(),
+    }
+}
+
+fn cli_locale_text(locale: &str, key: &str) -> Option<&'static str> {
+    CLI_LOCALE_CATALOG
+        .iter()
+        .find(|(id, _)| *id == locale)
+        .and_then(|(_, entries)| {
+            entries
+                .iter()
+                .find(|(entry_key, _)| *entry_key == key)
+                .map(|(_, value)| *value)
+        })
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -11315,55 +11355,65 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
 fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "claw v{VERSION}")?;
     writeln!(out)?;
-    writeln!(out, "Usage:")?;
+    writeln!(out, "{}:", cli_text("cli.usage"))?;
     writeln!(
         out,
         "  claw [--model MODEL] [--allowedTools TOOL[,TOOL...]]"
     )?;
-    writeln!(out, "      Start the interactive REPL")?;
+    writeln!(out, "      {}", cli_text("cli.help.repl"))?;
     writeln!(
         out,
         "  claw [--model MODEL] [--output-format text|json] prompt TEXT"
     )?;
-    writeln!(out, "      Send one prompt and exit")?;
+    writeln!(out, "      {}", cli_text("cli.help.prompt"))?;
     writeln!(
         out,
         "  claw [--model MODEL] [--output-format text|json] TEXT"
     )?;
-    writeln!(out, "      Shorthand non-interactive prompt mode")?;
+    writeln!(out, "      {}", cli_text("cli.help.short_prompt"))?;
     writeln!(
         out,
         "  claw --resume [SESSION.jsonl|session-id|latest] [/status] [/compact] [...]"
     )?;
     writeln!(
         out,
-        "      Inspect or maintain a saved session without entering the REPL"
+        "      {}",
+        cli_text("cli.help.resume")
     )?;
     writeln!(out, "  claw help")?;
-    writeln!(out, "      Alias for --help")?;
+    writeln!(out, "      {}", cli_text("cli.help.alias_help"))?;
     writeln!(out, "  claw version")?;
-    writeln!(out, "      Alias for --version")?;
+    writeln!(out, "      {}", cli_text("cli.help.alias_version"))?;
     writeln!(out, "  claw status")?;
     writeln!(
         out,
-        "      Show the current local workspace status snapshot"
+        "      {}",
+        cli_text("cli.help.status")
     )?;
     writeln!(out, "  claw sandbox")?;
-    writeln!(out, "      Show the current sandbox isolation snapshot")?;
+    writeln!(out, "      {}", cli_text("cli.help.sandbox"))?;
     writeln!(out, "  claw doctor")?;
     writeln!(
         out,
-        "      Diagnose local auth, config, workspace, and sandbox health"
+        "      {}",
+        cli_text("cli.help.doctor")
     )?;
     writeln!(out, "  claw acp [serve]")?;
     writeln!(
         out,
-        "      Show ACP/Zed editor integration status (currently unsupported; aliases: --acp, -acp)"
+        "      {}",
+        cli_text("cli.help.acp")
     )?;
-    writeln!(out, "      Source of truth: {OFFICIAL_REPO_SLUG}")?;
     writeln!(
         out,
-        "      Warning: do not `{DEPRECATED_INSTALL_COMMAND}` (deprecated stub)"
+        "      {}",
+        cli_text("cli.help.source_of_truth").replace("{url}", OFFICIAL_REPO_SLUG)
+    )?;
+    writeln!(
+        out,
+        "      {}",
+        cli_text("cli.help.warning_deprecated_install")
+            .replace("{command}", DEPRECATED_INSTALL_COMMAND)
     )?;
     writeln!(out, "  claw dump-manifests [--manifests-dir PATH]")?;
     writeln!(out, "  claw bootstrap-plan")?;
@@ -11378,37 +11428,48 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "      Dump the latest (or named) session as markdown; writes to PATH or stdout"
+        "      {}",
+        cli_text("cli.help.export")
     )?;
     writeln!(out)?;
-    writeln!(out, "Flags:")?;
+    writeln!(out, "{}:", cli_text("cli.flags"))?;
     writeln!(
         out,
-        "  --model MODEL              Override the active model"
+        "  --model MODEL              {}",
+        cli_text("flag.model")
     )?;
     writeln!(
         out,
-        "  --output-format FORMAT     Non-interactive output format: text or json"
+        "  --output-format FORMAT     {}",
+        cli_text("flag.output_format")
     )?;
     writeln!(
         out,
-        "  --compact                  Strip tool call details; print only the final assistant text (text mode only; useful for piping)"
+        "  --compact                  {}",
+        cli_text("flag.compact")
     )?;
     writeln!(
         out,
-        "  --permission-mode MODE     Set read-only, workspace-write, or danger-full-access"
+        "  --permission-mode MODE     {}",
+        cli_text("flag.permission_mode")
     )?;
     writeln!(
         out,
-        "  --dangerously-skip-permissions  Skip all permission checks"
+        "  --dangerously-skip-permissions  {}",
+        cli_text("flag.skip_permissions")
     )?;
-    writeln!(out, "  --allowedTools TOOLS       Restrict enabled tools (repeatable; comma-separated aliases supported)")?;
     writeln!(
         out,
-        "  --version, -V              Print version and build information locally"
+        "  --allowedTools TOOLS       {}",
+        cli_text("flag.allowed_tools")
+    )?;
+    writeln!(
+        out,
+        "  --version, -V              {}",
+        cli_text("flag.version")
     )?;
     writeln!(out)?;
-    writeln!(out, "Interactive slash commands:")?;
+    writeln!(out, "{}:", cli_text("cli.interactive_slash_commands"))?;
     writeln!(out, "{}", render_slash_command_help_filtered(STUB_COMMANDS))?;
     writeln!(out)?;
     let resume_commands = resume_supported_slash_commands()
@@ -11420,22 +11481,31 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         })
         .collect::<Vec<_>>()
         .join(", ");
-    writeln!(out, "Resume-safe commands: {resume_commands}")?;
+    writeln!(
+        out,
+        "{}: {resume_commands}",
+        cli_text("cli.resume_safe_commands")
+    )?;
     writeln!(out)?;
-    writeln!(out, "Session shortcuts:")?;
+    writeln!(out, "{}:", cli_text("cli.session_shortcuts"))?;
     writeln!(
         out,
-        "  REPL turns auto-save to .claw/sessions/<session-id>.{PRIMARY_SESSION_EXTENSION}"
+        "  {}",
+        cli_text("cli.session_shortcut.autosave")
+            .replace("{extension}", PRIMARY_SESSION_EXTENSION)
     )?;
     writeln!(
         out,
-        "  Use `{LATEST_SESSION_REFERENCE}` with --resume, /resume, or /session switch to target the newest saved session"
+        "  {}",
+        cli_text("cli.session_shortcut.latest")
+            .replace("{latest}", LATEST_SESSION_REFERENCE)
     )?;
     writeln!(
         out,
-        "  Use /session list in the REPL to browse managed sessions"
+        "  {}",
+        cli_text("cli.session_shortcut.list")
     )?;
-    writeln!(out, "Examples:")?;
+    writeln!(out, "{}:", cli_text("cli.examples"))?;
     writeln!(out, "  claw --model claude-opus \"summarize this repo\"")?;
     writeln!(
         out,
@@ -11455,10 +11525,16 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  claw mcp show my-server")?;
     writeln!(out, "  claw /skills")?;
     writeln!(out, "  claw doctor")?;
-    writeln!(out, "  source of truth: {OFFICIAL_REPO_URL}")?;
     writeln!(
         out,
-        "  do not run `{DEPRECATED_INSTALL_COMMAND}` — it installs a deprecated stub"
+        "  {}",
+        cli_text("cli.help.source_of_truth").replace("{url}", OFFICIAL_REPO_URL)
+    )?;
+    writeln!(
+        out,
+        "  {}",
+        cli_text("cli.help.no_deprecated_install")
+            .replace("{command}", DEPRECATED_INSTALL_COMMAND)
     )?;
     writeln!(out, "  claw init")?;
     writeln!(out, "  claw export")?;
@@ -14551,6 +14627,28 @@ mod tests {
         assert!(help.contains("cargo install claw-code"));
         assert!(!help.contains("claw login"));
         assert!(!help.contains("claw logout"));
+    }
+
+    #[test]
+    fn top_level_help_uses_ukrainian_when_requested() {
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "uk");
+
+        let mut help = Vec::new();
+        print_help_to(&mut help).expect("help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("Використання:"));
+        assert!(help.contains("Прапорці:"));
+        assert!(help.contains("Інтерактивні slash commands:"));
+        assert!(help.contains("Запустити interactive REPL"));
+        assert!(help.contains("Показати статус поточної сесії"));
+        assert!(help.contains("джерело істини: https://github.com/ultraworkers/claw-code"));
+
+        match original_lang {
+            Some(value) => std::env::set_var("CLAW_UI_LANG", value),
+            None => std::env::remove_var("CLAW_UI_LANG"),
+        }
     }
 
     #[test]

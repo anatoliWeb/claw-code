@@ -11,6 +11,46 @@ use runtime::{
 };
 use serde_json::{json, Value};
 
+include!(concat!(env!("OUT_DIR"), "/locale_catalog.rs"));
+
+fn ui_text(key: &str) -> &'static str {
+    let locale = ui_locale();
+    locale_text(&locale, key)
+        .or_else(|| locale_text("en", key))
+        .unwrap_or("")
+}
+
+fn ui_locale() -> String {
+    env::var("CLAW_UI_LANG")
+        .or_else(|_| env::var("CLAW_LANG"))
+        .or_else(|_| env::var("LANG"))
+        .ok()
+        .as_deref()
+        .map(normalize_locale)
+        .unwrap_or_else(|| "en".to_string())
+}
+
+fn normalize_locale(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.split('-').next().unwrap_or("en") {
+        "ua" => "uk".to_string(),
+        "" | "c" | "posix" => "en".to_string(),
+        language => language.to_string(),
+    }
+}
+
+fn locale_text(locale: &str, key: &str) -> Option<&'static str> {
+    LOCALE_CATALOG
+        .iter()
+        .find(|(id, _)| *id == locale)
+        .and_then(|(_, entries)| {
+            entries
+                .iter()
+                .find(|(entry_key, _)| *entry_key == key)
+                .map(|(_, value)| *value)
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandManifestEntry {
     pub name: String,
@@ -1847,17 +1887,35 @@ fn slash_command_usage(spec: &SlashCommandSpec) -> String {
     }
 }
 
+fn slash_command_summary(spec: &SlashCommandSpec) -> &'static str {
+    let key = format!("slash.summary.{}", spec.name);
+    let locale = ui_locale();
+    locale_text(&locale, &key)
+        .or_else(|| locale_text("en", &key))
+        .unwrap_or(spec.summary)
+}
+
 fn slash_command_detail_lines(spec: &SlashCommandSpec) -> Vec<String> {
     let mut lines = vec![format!("/{}", spec.name)];
-    lines.push(format!("  Summary          {}", spec.summary));
-    lines.push(format!("  Usage            {}", slash_command_usage(spec)));
     lines.push(format!(
-        "  Category         {}",
-        slash_command_category(spec.name)
+        "  {:<15}  {}",
+        ui_text("slash.detail.summary"),
+        slash_command_summary(spec)
+    ));
+    lines.push(format!(
+        "  {:<15}  {}",
+        ui_text("slash.detail.usage"),
+        slash_command_usage(spec)
+    ));
+    lines.push(format!(
+        "  {:<15}  {}",
+        ui_text("slash.detail.category"),
+        slash_command_category_label(slash_command_category(spec.name))
     ));
     if !spec.aliases.is_empty() {
         lines.push(format!(
-            "  Aliases          {}",
+            "  {:<15}  {}",
+            ui_text("slash.detail.aliases"),
             spec.aliases
                 .iter()
                 .map(|alias| format!("/{alias}"))
@@ -1866,7 +1924,11 @@ fn slash_command_detail_lines(spec: &SlashCommandSpec) -> Vec<String> {
         ));
     }
     if spec.resume_supported {
-        lines.push("  Resume           Supported with --resume SESSION.jsonl".to_string());
+        lines.push(format!(
+            "  {:<15}  {}",
+            ui_text("slash.detail.resume"),
+            ui_text("slash.detail.resume_supported")
+        ));
     }
     lines
 }
@@ -1909,6 +1971,17 @@ fn slash_command_category(name: &str) -> &'static str {
     }
 }
 
+fn slash_command_category_label(category: &'static str) -> &'static str {
+    let key = match category {
+        "Session" => "slash.category.session",
+        "Tools" => "slash.category.tools",
+        "Config" => "slash.category.config",
+        "Debug" => "slash.category.debug",
+        _ => return category,
+    };
+    ui_text(key)
+}
+
 fn format_slash_command_help_line(spec: &SlashCommandSpec) -> String {
     let name = slash_command_usage(spec);
     let alias_suffix = if spec.aliases.is_empty() {
@@ -1924,11 +1997,14 @@ fn format_slash_command_help_line(spec: &SlashCommandSpec) -> String {
         )
     };
     let resume = if spec.resume_supported {
-        " [resume]"
+        format!(" [{}]", ui_text("slash.resume_marker"))
     } else {
-        ""
+        String::new()
     };
-    format!("  {name:<66} {}{alias_suffix}{resume}", spec.summary)
+    format!(
+        "  {name:<66} {}{alias_suffix}{resume}",
+        slash_command_summary(spec)
+    )
 }
 
 fn levenshtein_distance(left: &str, right: &str) -> usize {
@@ -2011,16 +2087,23 @@ pub fn suggest_slash_commands(input: &str, limit: usize) -> Vec<String> {
 /// Pass an empty slice to include all commands.
 pub fn render_slash_command_help_filtered(exclude: &[&str]) -> String {
     let mut lines = vec![
-        "Slash commands".to_string(),
-        "  Start here        /status, /diff, /agents, /skills, /commit".to_string(),
-        "  [resume]          also works with --resume SESSION.jsonl".to_string(),
+        ui_text("slash.title").to_string(),
+        format!(
+            "  {:<17} /status, /diff, /agents, /skills, /commit",
+            ui_text("slash.start_here")
+        ),
+        format!(
+            "  [{}]          {}",
+            ui_text("slash.resume_marker"),
+            ui_text("slash.resume_hint")
+        ),
         String::new(),
     ];
 
     let categories = ["Session", "Tools", "Config", "Debug"];
 
     for category in categories {
-        lines.push(category.to_string());
+        lines.push(slash_command_category_label(category).to_string());
         for spec in slash_command_specs()
             .iter()
             .filter(|spec| slash_command_category(spec.name) == category)
@@ -2044,16 +2127,23 @@ pub fn render_slash_command_help_filtered(exclude: &[&str]) -> String {
 
 pub fn render_slash_command_help() -> String {
     let mut lines = vec![
-        "Slash commands".to_string(),
-        "  Start here        /status, /diff, /agents, /skills, /commit".to_string(),
-        "  [resume]          also works with --resume SESSION.jsonl".to_string(),
+        ui_text("slash.title").to_string(),
+        format!(
+            "  {:<17} /status, /diff, /agents, /skills, /commit",
+            ui_text("slash.start_here")
+        ),
+        format!(
+            "  [{}]          {}",
+            ui_text("slash.resume_marker"),
+            ui_text("slash.resume_hint")
+        ),
         String::new(),
     ];
 
     let categories = ["Session", "Tools", "Config", "Debug"];
 
     for category in categories {
-        lines.push(category.to_string());
+        lines.push(slash_command_category_label(category).to_string());
         for spec in slash_command_specs()
             .iter()
             .filter(|spec| slash_command_category(spec.name) == category)
@@ -2063,11 +2153,23 @@ pub fn render_slash_command_help() -> String {
         lines.push(String::new());
     }
 
-    lines.push("Keyboard shortcuts".to_string());
-    lines.push("  Up/Down              Navigate prompt history".to_string());
-    lines.push("  Tab                  Complete commands, modes, and recent sessions".to_string());
-    lines.push("  Ctrl-C               Clear input (or exit on empty prompt)".to_string());
-    lines.push("  Shift+Enter/Ctrl+J   Insert a newline".to_string());
+    lines.push(ui_text("slash.keyboard_shortcuts").to_string());
+    lines.push(format!(
+        "  Up/Down              {}",
+        ui_text("slash.keyboard.up_down")
+    ));
+    lines.push(format!(
+        "  Tab                  {}",
+        ui_text("slash.keyboard.tab")
+    ));
+    lines.push(format!(
+        "  Ctrl-C               {}",
+        ui_text("slash.keyboard.ctrl_c")
+    ));
+    lines.push(format!(
+        "  Shift+Enter/Ctrl+J   {}",
+        ui_text("slash.keyboard.newline")
+    ));
 
     lines
         .into_iter()
@@ -2140,6 +2242,7 @@ impl DefinitionSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgentSummary {
     name: String,
+    title: Option<String>,
     description: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
@@ -2369,7 +2472,12 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             if filter.starts_with('-') {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("unknown option for `agents list`: {filter}\nUsage: claw agents list [<filter>]\nFilters are name substrings, not flags."),
+                    format!(
+                        "{} `agents list`: {filter}\n{}\n{}",
+                        ui_text("agents.error.unknown_option_for"),
+                        ui_text("agents.usage.list_filter"),
+                        ui_text("agents.hint.filters_name_substrings")
+                    ),
                 ));
             }
             let roots = discover_definition_roots(cwd, "agents");
@@ -2401,7 +2509,12 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
                 let extra = name_raw.split_once(' ').map(|(_, e)| e).unwrap_or("");
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("unexpected extra arguments after agent name\nUsage: claw agents show <name>\nUnexpected extra: '{extra}'"),
+                    format!(
+                        "{}\n{}\n{}: '{extra}'",
+                        ui_text("agents.error.unexpected_extra_args"),
+                        ui_text("agents.usage.show_name"),
+                        ui_text("agents.help.unexpected")
+                    ),
                 ));
             }
             let roots = discover_definition_roots(cwd, "agents");
@@ -2413,7 +2526,7 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             if matched.is_empty() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("agent not found: {name_raw}"),
+                    format!("{}: {name_raw}", ui_text("agents.error.not_found")),
                 ));
             }
             Ok(render_agents_report(&matched))
@@ -2421,7 +2534,11 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
         Some(args) if is_help_arg(args) => Ok(render_agents_usage(None)),
         Some(args) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("unknown agents subcommand: {args}.\nSupported: list, show, help"),
+            format!(
+                "{}: {args}.\n{}: list, show, help",
+                ui_text("agents.error.unknown_subcommand"),
+                ui_text("agents.label.supported")
+            ),
         )),
     }
 }
@@ -2453,7 +2570,11 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "status": "error",
                     "error_kind": "unknown_option",
                     "unexpected": filter,
-                    "hint": "Usage: claw agents list [<filter>]\nFilters are name substrings, not flags.",
+                    "hint": format!(
+                        "{}\n{}",
+                        ui_text("agents.usage.list_filter"),
+                        ui_text("agents.hint.filters_name_substrings")
+                    ),
                 }));
             }
             let roots = discover_definition_roots(cwd, "agents");
@@ -2494,7 +2615,11 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "status": "error",
                     "error_kind": "unexpected_extra_args",
                     "unexpected": extra_token,
-                    "hint": format!("Usage: claw agents show <name>\nUnexpected extra: '{extra_token}'"),
+                    "hint": format!(
+                        "{}\n{}: '{extra_token}'",
+                        ui_text("agents.usage.show_name"),
+                        ui_text("agents.help.unexpected")
+                    ),
                 }));
             }
             let roots = discover_definition_roots(cwd, "agents");
@@ -2511,9 +2636,9 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "error_kind": "agent_not_found",
                     "requested": name,
                     // #734: parity with skills show which always emits a message field
-                    "message": format!("agent '{}' not found", name),
+                    "message": format!("{}: {name}", ui_text("agents.error.not_found")),
                     // #760: hint so callers know how to enumerate available agents
-                    "hint": "Run `claw agents list` to see available agents.",
+                    "hint": ui_text("agents.hint.list_available"),
                 }));
             }
             Ok(render_agents_report_json_with_action(cwd, &matched, "show"))
@@ -2521,7 +2646,11 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
         Some(args) if is_help_arg(args) => Ok(render_agents_usage_json(None)),
         Some(args) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("unknown agents subcommand: {args}.\nSupported: list, show, help"),
+            format!(
+                "{}: {args}.\n{}: list, show, help",
+                ui_text("agents.error.unknown_subcommand"),
+                ui_text("agents.label.supported")
+            ),
         )),
     }
 }
@@ -3646,23 +3775,43 @@ fn load_agents_from_roots(
         let mut root_agents = Vec::new();
         for entry in fs::read_dir(root)? {
             let entry = entry?;
-            if entry.path().extension().is_none_or(|ext| ext != "toml") {
-                continue;
-            }
-            let contents = fs::read_to_string(entry.path())?;
+            let path = entry.path();
             let fallback_name = entry.path().file_stem().map_or_else(
                 || entry.file_name().to_string_lossy().to_string(),
                 |stem| stem.to_string_lossy().to_string(),
             );
-            root_agents.push(AgentSummary {
-                name: parse_toml_string(&contents, "name").unwrap_or(fallback_name),
-                description: parse_toml_string(&contents, "description"),
-                model: parse_toml_string(&contents, "model"),
-                reasoning_effort: parse_toml_string(&contents, "model_reasoning_effort"),
-                source: *source,
-                shadowed_by: None,
-                path: Some(entry.path()),
-            });
+            let Some(extension) = path.extension().map(|ext| ext.to_string_lossy()) else {
+                continue;
+            };
+            let contents = fs::read_to_string(&path)?;
+            let summary = if extension.eq_ignore_ascii_case("toml") {
+                let name = parse_toml_string(&contents, "name").unwrap_or(fallback_name);
+                AgentSummary {
+                    name: name.clone(),
+                    title: Some(name),
+                    description: parse_toml_string(&contents, "description"),
+                    model: parse_toml_string(&contents, "model"),
+                    reasoning_effort: parse_toml_string(&contents, "model_reasoning_effort"),
+                    source: *source,
+                    shadowed_by: None,
+                    path: Some(path),
+                }
+            } else if extension.eq_ignore_ascii_case("md") {
+                let (title, description) = parse_markdown_agent_summary(&contents);
+                AgentSummary {
+                    name: fallback_name.clone(),
+                    title: title.or_else(|| Some(fallback_name.clone())),
+                    description,
+                    model: None,
+                    reasoning_effort: None,
+                    source: *source,
+                    shadowed_by: None,
+                    path: Some(path),
+                }
+            } else {
+                continue;
+            };
+            root_agents.push(summary);
         }
         root_agents.sort_by(|left, right| left.name.cmp(&right.name));
 
@@ -3678,6 +3827,55 @@ fn load_agents_from_roots(
     }
 
     Ok(agents)
+}
+
+fn parse_markdown_agent_summary(contents: &str) -> (Option<String>, Option<String>) {
+    let mut title = None;
+    let mut after_heading = false;
+    let mut paragraph = Vec::new();
+
+    for line in contents.lines() {
+        let trimmed = line.trim().trim_start_matches('\u{feff}').trim();
+        if title.is_none() {
+            if let Some(heading) = trimmed.strip_prefix("# ") {
+                let heading = heading.trim();
+                if !heading.is_empty() {
+                    title = Some(heading.to_string());
+                    after_heading = true;
+                }
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if after_heading || !paragraph.is_empty() {
+            paragraph.push(trimmed.to_string());
+            after_heading = false;
+        }
+    }
+
+    if title.is_none() {
+        for line in contents.lines() {
+            let trimmed = line.trim().trim_start_matches('\u{feff}').trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                paragraph.push(trimmed.to_string());
+                break;
+            }
+        }
+    }
+
+    let description = if paragraph.is_empty() {
+        None
+    } else {
+        Some(paragraph.join(" "))
+    };
+    (title, description)
 }
 
 fn load_skills_from_roots(roots: &[SkillRoot]) -> std::io::Result<Vec<SkillSummary>> {
@@ -3830,7 +4028,7 @@ fn unquote_frontmatter_value(value: &str) -> String {
 
 fn render_agents_report(agents: &[AgentSummary]) -> String {
     if agents.is_empty() {
-        return "No agents found.".to_string();
+        return ui_text("agents.none").to_string();
     }
 
     let total_active = agents
@@ -3838,32 +4036,13 @@ fn render_agents_report(agents: &[AgentSummary]) -> String {
         .filter(|agent| agent.shadowed_by.is_none())
         .count();
     let mut lines = vec![
-        "Agents".to_string(),
-        format!("  {total_active} active agents"),
+        ui_text("agents.title").to_string(),
+        format!("  {total_active} {}", ui_text("agents.active_suffix")),
         String::new(),
     ];
 
-    for scope in [
-        DefinitionScope::Project,
-        DefinitionScope::UserConfigHome,
-        DefinitionScope::UserHome,
-    ] {
-        let group = agents
-            .iter()
-            .filter(|agent| agent.source.report_scope() == scope)
-            .collect::<Vec<_>>();
-        if group.is_empty() {
-            continue;
-        }
-
-        lines.push(format!("{}:", scope.label()));
-        for agent in group {
-            let detail = agent_detail(agent);
-            match agent.shadowed_by {
-                Some(winner) => lines.push(format!("  (shadowed by {}) {detail}", winner.label())),
-                None => lines.push(format!("  {detail}")),
-            }
-        }
+    for agent in agents {
+        lines.extend(agent_detail_lines(agent));
         lines.push(String::new());
     }
 
@@ -3898,18 +4077,63 @@ fn render_agents_report_json_with_action(
     })
 }
 
-fn agent_detail(agent: &AgentSummary) -> String {
-    let mut parts = vec![agent.name.clone()];
+fn agent_source_type(agent: &AgentSummary) -> &'static str {
+    match agent.source.report_scope() {
+        DefinitionScope::Project => ui_text("agents.source.project"),
+        DefinitionScope::UserConfigHome | DefinitionScope::UserHome => ui_text("agents.source.global"),
+    }
+}
+
+fn agent_source_type_id(agent: &AgentSummary) -> &'static str {
+    match agent.source.report_scope() {
+        DefinitionScope::Project => "project",
+        DefinitionScope::UserConfigHome | DefinitionScope::UserHome => "global",
+    }
+}
+
+fn definition_source_label_ui(source: DefinitionSource) -> &'static str {
+    match source.report_scope() {
+        DefinitionScope::Project => ui_text("agents.source.project_roots"),
+        DefinitionScope::UserConfigHome => ui_text("agents.source.user_config_roots"),
+        DefinitionScope::UserHome => ui_text("agents.source.user_home_roots"),
+    }
+}
+
+fn agent_detail_lines(agent: &AgentSummary) -> Vec<String> {
+    let mut lines = vec![format!("  {}", agent.name)];
+    if let Some(winner) = agent.shadowed_by {
+        lines[0].push_str(&format!(
+            " ({} {})",
+            ui_text("agents.shadowed_by"),
+            definition_source_label_ui(winner)
+        ));
+    }
+    lines.push(format!(
+        "    {}: {}",
+        ui_text("agents.field.title"),
+        agent.title.as_deref().unwrap_or(agent.name.as_str())
+    ));
+    lines.push(format!(
+        "    {}: {}",
+        ui_text("agents.field.source"),
+        agent_source_type(agent)
+    ));
+    if let Some(path) = &agent.path {
+        lines.push(format!("    {}: {}", ui_text("agents.field.path"), path.display()));
+    }
     if let Some(description) = &agent.description {
-        parts.push(description.clone());
+        lines.push(format!(
+            "    {}: {description}",
+            ui_text("agents.field.description")
+        ));
     }
     if let Some(model) = &agent.model {
-        parts.push(model.clone());
+        lines.push(format!("    {}: {model}", ui_text("agents.field.model")));
     }
     if let Some(reasoning) = &agent.reasoning_effort {
-        parts.push(reasoning.clone());
+        lines.push(format!("    {}: {reasoning}", ui_text("agents.field.reasoning")));
     }
-    parts.join(" · ")
+    lines
 }
 
 fn render_skills_report(skills: &[SkillSummary]) -> String {
@@ -4183,13 +4407,42 @@ fn help_path_from_args(args: &str) -> Option<Vec<&str>> {
 
 fn render_agents_usage(unexpected: Option<&str>) -> String {
     let mut lines = vec![
-        "Agents".to_string(),
-        "  Usage            /agents [list|help]".to_string(),
-        "  Direct CLI       claw agents".to_string(),
-        "  Sources          .claw/agents, ~/.claw/agents, $CLAW_CONFIG_HOME/agents".to_string(),
+        ui_text("agents.title").to_string(),
+        format!(
+            "  {:<16} /agents [list|show <name>|help]",
+            ui_text("agents.help.usage")
+        ),
+        format!(
+            "  {:<16} claw agents [list|show <name>|help]",
+            ui_text("agents.help.direct_cli")
+        ),
+        format!(
+            "  {:<16} /workspace/.claw/agents/*.md or ./.claw/agents/*.md",
+            ui_text("agents.help.project_agents")
+        ),
+        format!(
+            "  {:<16} /root/.claw/agents/*.md or ~/.claw/agents/*.md",
+            ui_text("agents.help.global_agents")
+        ),
+        format!(
+            "  {:<16} $CLAW_CONFIG_HOME/agents/*.md",
+            ui_text("agents.help.config_agents")
+        ),
+        format!(
+            "  {:<16} {}",
+            ui_text("agents.help.format"),
+            ui_text("agents.help.format_value")
+        ),
+        format!(
+            "  {:<16} .claw/agents/pic-mplab-engineer.md",
+            ui_text("agents.help.example")
+        ),
+        "                   # PIC MPLAB Engineer".to_string(),
+        format!("                   {}", ui_text("agents.help.example_description")),
+        format!("                   {}", ui_text("agents.help.example_instructions")),
     ];
     if let Some(args) = unexpected {
-        lines.push(format!("  Unexpected       {args}"));
+        lines.push(format!("  {:<16} {args}", ui_text("agents.help.unexpected")));
     }
     lines.join("\n")
 }
@@ -4201,9 +4454,18 @@ fn render_agents_usage_json(unexpected: Option<&str>) -> Value {
         "ok": unexpected.is_none(),
         "status": if unexpected.is_some() { "error" } else { "ok" },
         "usage": {
-            "slash_command": "/agents [list|help]",
-            "direct_cli": "claw agents [list|help]",
-            "sources": [".claw/agents", "~/.claw/agents", "$CLAW_CONFIG_HOME/agents"],
+            "slash_command": "/agents [list|show <name>|help]",
+            "direct_cli": "claw agents [list|show <name>|help]",
+            "sources": [
+                "/workspace/.claw/agents",
+                ".claw/agents",
+                "/root/.claw/agents",
+                "~/.claw/agents",
+                "$CLAW_CONFIG_HOME/agents"
+            ],
+            "format": "one markdown file per agent; filename without .md is the agent name; first '# heading' is the title; first paragraph after the heading is the description",
+            "example_path": ".claw/agents/pic-mplab-engineer.md",
+            "example": "# PIC MPLAB Engineer\n\nShort description paragraph.\n\nAgent instructions go here.",
         },
         "unexpected": unexpected,
     })
@@ -4407,10 +4669,12 @@ fn definition_source_json_with_detail(
 fn agent_summary_json(agent: &AgentSummary) -> Value {
     json!({
         "name": &agent.name,
+        "title": &agent.title,
         "description": &agent.description,
         "model": &agent.model,
         "reasoning_effort": &agent.reasoning_effort,
         "source": definition_source_json(agent.source),
+        "source_type": agent_source_type_id(agent),
         "active": agent.shadowed_by.is_none(),
         "shadowed_by": agent.shadowed_by.map(definition_source_json),
         // #728: expose on-disk path so callers can inspect the agent file directly
@@ -4637,7 +4901,8 @@ mod tests {
         render_agents_report_json, render_mcp_report_json_for, render_plugins_report,
         render_plugins_report_with_failures, render_skills_report, render_slash_command_help,
         render_slash_command_help_detail, resolve_skill_path, resume_supported_slash_commands,
-        slash_command_specs, suggest_slash_commands, validate_slash_command_input,
+        slash_command_specs, slash_command_summary, suggest_slash_commands,
+        ui_text, validate_slash_command_input,
         DefinitionSource, SkillOrigin, SkillRoot, SkillSlashDispatch, SlashCommand,
     };
     use plugins::{
@@ -4723,6 +4988,15 @@ mod tests {
             ),
         )
         .expect("write agent");
+    }
+
+    fn write_markdown_agent(root: &Path, name: &str, title: &str, description: &str) {
+        fs::create_dir_all(root).expect("agent root");
+        fs::write(
+            root.join(format!("{name}.md")),
+            format!("# {title}\n\n{description}\n\nDetailed agent instructions go here.\n"),
+        )
+        .expect("write markdown agent");
     }
 
     fn write_skill(root: &Path, name: &str, description: &str) {
@@ -5185,6 +5459,10 @@ mod tests {
 
     #[test]
     fn renders_help_from_shared_specs() {
+        let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "en");
+
         let help = render_slash_command_help();
         assert!(help.contains("Start here        /status, /diff, /agents, /skills, /commit"));
         assert!(help.contains("[resume]          also works with --resume SESSION.jsonl"));
@@ -5228,10 +5506,16 @@ mod tests {
         assert!(!help.contains("/logout"));
         assert_eq!(slash_command_specs().len(), 139);
         assert!(resume_supported_slash_commands().len() >= 39);
+
+        restore_env_var("CLAW_UI_LANG", original_lang);
     }
 
     #[test]
     fn renders_help_with_grouped_categories_and_keyboard_shortcuts() {
+        let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "en");
+
         // given
         let categories = ["Session", "Tools", "Config", "Debug"];
 
@@ -5270,11 +5554,37 @@ mod tests {
                 "expected help to contain command {usage}"
             );
             assert!(
-                help.contains(spec.summary),
+                help.contains(slash_command_summary(spec)),
                 "expected help to contain summary for /{}",
                 spec.name
             );
         }
+
+        restore_env_var("CLAW_UI_LANG", original_lang);
+    }
+
+    #[test]
+    fn renders_slash_command_summaries_in_ukrainian_when_requested() {
+        let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "uk");
+
+        let help = render_slash_command_help();
+        let plugins_detail =
+            render_slash_command_help_detail("plugins").expect("detail help should exist");
+        let mcp_detail = render_slash_command_help_detail("mcp").expect("detail help should exist");
+
+        assert!(help.contains("Показати статус поточної сесії"));
+        assert!(help.contains("Показати налаштованих агентів"));
+        assert!(help.contains("Керувати Claw Code plugins"));
+        assert!(help.contains(ui_text("slash.title")));
+        assert!(help.contains(ui_text("slash.start_here")));
+        assert!(plugins_detail.contains(ui_text("slash.detail.summary")));
+        assert!(plugins_detail.contains("Керувати Claw Code plugins"));
+        assert!(mcp_detail.contains(ui_text("slash.detail.summary")));
+        assert!(mcp_detail.contains("Переглянути налаштовані MCP servers"));
+
+        restore_env_var("CLAW_UI_LANG", original_lang);
     }
 
     #[test]
@@ -5555,14 +5865,138 @@ mod tests {
 
         assert!(report.contains("Agents"));
         assert!(report.contains("2 active agents"));
-        assert!(report.contains("Project roots:"));
-        assert!(report.contains("planner · Project planner · gpt-5.4 · medium"));
-        assert!(report.contains("User home roots:"));
-        assert!(report.contains("(shadowed by Project roots) planner · User planner"));
-        assert!(report.contains("verifier · Verification agent · gpt-5.4-mini · high"));
+        assert!(report.contains("  planner\n"));
+        assert!(report.contains("    Source: project"));
+        assert!(report.contains("    Description: Project planner"));
+        assert!(report.contains("    Model: gpt-5.4"));
+        assert!(report.contains("    Reasoning: medium"));
+        assert!(report.contains("  planner (shadowed by Project roots)"));
+        assert!(report.contains("    Description: User planner"));
+        assert!(report.contains("  verifier\n"));
+        assert!(report.contains("    Source: global"));
+        assert!(report.contains("    Description: Verification agent"));
 
         let _ = fs::remove_dir_all(workspace);
         let _ = fs::remove_dir_all(user_home);
+    }
+
+    #[test]
+    fn lists_markdown_agents_from_project_claw_and_user_claw_roots() {
+        let workspace = temp_dir("agents-md-workspace");
+        let project_agents = workspace.join(".claw").join("agents");
+        let user_home = temp_dir("agents-md-home");
+        let user_agents = user_home.join(".claw").join("agents");
+
+        write_markdown_agent(
+            &project_agents,
+            "pic-mplab-engineer",
+            "PIC MPLAB Engineer",
+            "Works on PIC firmware in MPLAB X and XC8.",
+        );
+        write_markdown_agent(
+            &user_agents,
+            "pic-mplab-engineer",
+            "Global PIC MPLAB Engineer",
+            "Global fallback PIC firmware specialist.",
+        );
+        write_markdown_agent(
+            &user_agents,
+            "global-reviewer",
+            "Global Reviewer",
+            "Reviews code across workspaces.",
+        );
+
+        let roots = vec![
+            (DefinitionSource::ProjectClaw, project_agents.clone()),
+            (DefinitionSource::UserClaw, user_agents.clone()),
+        ];
+        let agents = load_agents_from_roots(&roots).expect("markdown agent roots should load");
+        let report = render_agents_report(&agents);
+
+        assert!(report.contains("2 active agents"));
+        assert!(report.contains("  pic-mplab-engineer\n"));
+        assert!(report.contains("    Title: PIC MPLAB Engineer"));
+        assert!(report.contains("    Source: project"));
+        assert!(report.contains("    Description: Works on PIC firmware"));
+        assert!(report.contains(&format!(
+            "    Path: {}",
+            project_agents.join("pic-mplab-engineer.md").display()
+        )));
+        assert!(report.contains("  pic-mplab-engineer (shadowed by Project roots)"));
+        assert!(report.contains("  global-reviewer\n"));
+        assert!(report.contains("    Source: global"));
+        assert!(report.contains("    Description: Reviews code across workspaces."));
+
+        let json = render_agents_report_json(&workspace, &agents);
+        assert_eq!(json["summary"]["active"], 2);
+        assert_eq!(json["agents"][0]["name"], "pic-mplab-engineer");
+        assert_eq!(json["agents"][0]["title"], "PIC MPLAB Engineer");
+        assert_eq!(json["agents"][0]["source_type"], "project");
+        assert_eq!(
+            json["agents"][0]["description"],
+            "Works on PIC firmware in MPLAB X and XC8."
+        );
+        assert_eq!(json["agents"][0]["active"], true);
+        assert_eq!(json["agents"][1]["name"], "global-reviewer");
+        assert_eq!(json["agents"][1]["source_type"], "global");
+        assert_eq!(json["agents"][2]["active"], false);
+        assert_eq!(json["agents"][2]["shadowed_by"]["id"], "project_claw");
+
+        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(user_home);
+    }
+
+    #[test]
+    fn renders_agents_report_and_help_in_ukrainian_when_requested() {
+        let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "uk");
+
+        let workspace = temp_dir("agents-uk-workspace");
+        let project_agents = workspace.join(".claw").join("agents");
+        write_markdown_agent(
+            &project_agents,
+            "pic-mplab-engineer",
+            "PIC MPLAB Engineer",
+            "Works on PIC firmware in MPLAB X and XC8.",
+        );
+
+        let roots = vec![(DefinitionSource::ProjectClaw, project_agents)];
+        let agents = load_agents_from_roots(&roots).expect("markdown agent roots should load");
+        let report = render_agents_report(&agents);
+        let help =
+            super::handle_agents_slash_command(Some("help"), &workspace).expect("agents help");
+
+        assert!(report.contains("Агенти"));
+        assert!(report.contains("1 активних агентів"));
+        assert!(report.contains("    Джерело: проєктний"));
+        assert!(help.contains("Використання"));
+        assert!(help.contains("Глобальні агенти"));
+        let missing = super::handle_agents_slash_command(Some("show missing-agent"), &workspace)
+            .expect_err("missing agent should error")
+            .to_string();
+        let bad_filter = super::handle_agents_slash_command(Some("list --bad"), &workspace)
+            .expect_err("flag-shaped filters should error")
+            .to_string();
+        let unknown = super::handle_agents_slash_command(Some("frobnicate"), &workspace)
+            .expect_err("unknown subcommand should error")
+            .to_string();
+        let json_missing =
+            handle_agents_slash_command_json(Some("show missing-agent"), &workspace)
+                .expect("missing agent returns json error");
+
+        assert!(missing.contains("агента не знайдено"));
+        assert!(bad_filter.contains("невідома опція"));
+        assert!(bad_filter.contains("Фільтри є частинами імен"));
+        assert!(unknown.contains("невідома підкоманда agents"));
+        assert_eq!(json_missing["message"], "агента не знайдено: missing-agent");
+        assert_eq!(
+            json_missing["hint"],
+            "Запусти `claw agents list`, щоб побачити доступних агентів."
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+        restore_env_var("CLAW_UI_LANG", original_lang);
     }
 
     #[test]
@@ -5622,7 +6056,10 @@ mod tests {
         assert_eq!(help["kind"], "agents");
         assert_eq!(help["action"], "help");
         assert_eq!(help["status"], "ok");
-        assert_eq!(help["usage"]["direct_cli"], "claw agents [list|help]");
+        assert_eq!(
+            help["usage"]["direct_cli"],
+            "claw agents [list|show <name>|help]"
+        );
 
         // `show <name>` is now valid. Known agent returns ok with matching entry.
         let show_planner = handle_agents_slash_command_json(Some("show planner"), &workspace)
@@ -5787,10 +6224,10 @@ mod tests {
 
         let agents_help =
             super::handle_agents_slash_command(Some("help"), &cwd).expect("agents help");
-        assert!(agents_help.contains("Usage            /agents [list|help]"));
-        assert!(agents_help.contains("Direct CLI       claw agents"));
-        assert!(agents_help
-            .contains("Sources          .claw/agents, ~/.claw/agents, $CLAW_CONFIG_HOME/agents"));
+        assert!(agents_help.contains("Usage            /agents [list|show <name>|help]"));
+        assert!(agents_help.contains("Direct CLI       claw agents [list|show <name>|help]"));
+        assert!(agents_help.contains("Project agents   /workspace/.claw/agents/*.md"));
+        assert!(agents_help.contains("Global agents    /root/.claw/agents/*.md"));
 
         // `show <name>` is now valid. For an agent that doesn't exist it returns Err(NotFound).
         let agents_show_missing = super::handle_agents_slash_command(Some("show planner"), &cwd);
