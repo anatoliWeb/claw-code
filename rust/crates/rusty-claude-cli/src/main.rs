@@ -14580,6 +14580,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         let rendered = format_user_visible_api_error("session-issue-32", &error);
@@ -14615,7 +14616,7 @@ mod tests {
                 retryable: false,
                 suggested_action: None,
                 retry_after: None,
-}),
+            }),
         };
 
         let rendered = format_user_visible_api_error("session-issue-32", &error);
