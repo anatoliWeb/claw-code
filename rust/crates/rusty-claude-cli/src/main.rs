@@ -4121,17 +4121,77 @@ fn format_unknown_slash_command_message(name: &str) -> String {
     message
 }
 
-fn format_model_report(model: &str, message_count: usize, turns: u32) -> String {
-    format!(
-        "Model
-  Current model    {model}
-  Session messages {message_count}
-  Session turns    {turns}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AvailableModel {
+    alias: String,
+    model: String,
+}
 
-Usage
-  Inspect current model with /model
-  Switch models with /model <name>"
-    )
+fn parse_available_models_env_value(value: &str) -> Vec<AvailableModel> {
+    value
+        .split(';')
+        .filter_map(|entry| {
+            let (alias, model) = entry.split_once('=')?;
+            let alias = alias.trim();
+            let model = model.trim();
+            if alias.is_empty() || model.is_empty() {
+                return None;
+            }
+            Some(AvailableModel {
+                alias: alias.to_string(),
+                model: model.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn available_models_from_env() -> Vec<AvailableModel> {
+    env::var("CLAW_AVAILABLE_MODELS")
+        .ok()
+        .map(|value| parse_available_models_env_value(&value))
+        .unwrap_or_default()
+}
+
+fn resolve_available_model_alias(alias: &str) -> Option<String> {
+    let alias = alias.trim();
+    available_models_from_env()
+        .into_iter()
+        .find(|entry| entry.alias == alias)
+        .map(|entry| entry.model)
+}
+
+fn resolve_slash_model_name(model: &str) -> String {
+    resolve_available_model_alias(model).unwrap_or_else(|| resolve_model_alias_with_config(model))
+}
+
+fn format_model_report(model: &str, message_count: usize, turns: u32) -> String {
+    let mut lines = vec![
+        cli_text("model.title").to_string(),
+        format!("  {:<16} {model}", cli_text("model.current")),
+        format!("  {:<16} {message_count}", cli_text("model.session_messages")),
+        format!("  {:<16} {turns}", cli_text("model.session_turns")),
+    ];
+
+    let available_models = available_models_from_env();
+    if !available_models.is_empty() {
+        lines.push(String::new());
+        lines.push(cli_text("model.available_models").to_string());
+        for available in available_models {
+            lines.push(format!("  {:<16} {}", available.alias, available.model));
+        }
+    }
+
+    lines.extend([
+        String::new(),
+        cli_text("model.usage").to_string(),
+        format!("  {}", cli_text("model.usage.inspect")),
+        format!("  {}", cli_text("model.usage.switch")),
+    ]);
+    if !available_models_from_env().is_empty() {
+        lines.push(format!("  {}", cli_text("model.usage.alias")));
+    }
+
+    lines.join("\n")
 }
 
 fn format_model_switch_report(previous: &str, next: &str, message_count: usize) -> String {
@@ -6273,7 +6333,7 @@ impl LiveCli {
             return Ok(false);
         };
 
-        let model = resolve_model_alias_with_config(&model);
+        let model = resolve_slash_model_name(&model);
 
         if model == self.model {
             println!(
@@ -11574,15 +11634,17 @@ mod tests {
         format_pr_report, format_resume_report, format_status_report, format_tool_call_start,
         format_tool_result, format_ultraplan_report, format_unknown_slash_command,
         format_unknown_slash_command_message, format_user_visible_api_error,
-        merge_prompt_with_stdin, normalize_permission_mode, parse_args, parse_export_args,
-        parse_git_status_branch, parse_git_status_metadata_for, parse_git_workspace_summary,
-        parse_history_count, permission_policy, print_help_to, push_output_block,
-        render_config_report, render_diff_report, render_diff_report_for, render_help_topic,
-        render_help_topic_json, render_memory_report, render_prompt_history_report,
-        render_repl_help, render_resume_usage, render_session_list, render_session_markdown,
+        merge_prompt_with_stdin, normalize_permission_mode, parse_args,
+        parse_available_models_env_value, parse_export_args, parse_git_status_branch,
+        parse_git_status_metadata_for, parse_git_workspace_summary, parse_history_count,
+        permission_policy, print_help_to, push_output_block, render_config_report,
+        render_diff_report, render_diff_report_for, render_help_topic, render_help_topic_json,
+        render_memory_report, render_prompt_history_report, render_repl_help, render_resume_usage,
+        render_session_list, render_session_markdown, resolve_available_model_alias,
         resolve_model_alias, resolve_model_alias_with_config, resolve_repl_model,
-        resolve_session_reference, response_to_events, resume_supported_slash_commands,
-        run_resume_command, short_tool_id, slash_command_completion_candidates_with_sessions,
+        resolve_session_reference, resolve_slash_model_name, response_to_events,
+        resume_supported_slash_commands, run_resume_command, short_tool_id,
+        slash_command_completion_candidates_with_sessions,
         split_error_hint, status_context, status_json_value, summarize_tool_payload_for_markdown,
         try_resolve_bare_skill_prompt, validate_no_args, write_mcp_server_fixture, CliAction,
         CliOutputFormat, CliToolExecutor, GitWorkspaceSummary, InternalPromptProgressEvent,
@@ -14640,7 +14702,7 @@ mod tests {
 
         assert!(help.contains("Використання:"));
         assert!(help.contains("Прапорці:"));
-        assert!(help.contains("Інтерактивні slash commands:"));
+        assert!(help.contains("Інтерактивні slash-команди:"));
         assert!(help.contains("Запустити interactive REPL"));
         assert!(help.contains("Показати статус поточної сесії"));
         assert!(help.contains("джерело істини: https://github.com/ultraworkers/claw-code"));
@@ -14653,11 +14715,105 @@ mod tests {
 
     #[test]
     fn model_report_uses_sectioned_layout() {
+        let _guard = env_lock();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        let original_available = std::env::var_os("CLAW_AVAILABLE_MODELS");
+        std::env::set_var("CLAW_UI_LANG", "en");
+        std::env::remove_var("CLAW_AVAILABLE_MODELS");
+
         let report = format_model_report("claude-sonnet", 12, 4);
         assert!(report.contains("Model"));
         assert!(report.contains("Current model    claude-sonnet"));
         assert!(report.contains("Session messages 12"));
         assert!(report.contains("Switch models with /model <name>"));
+        assert!(!report.contains("Available models"));
+
+        std::env::set_var(
+            "CLAW_AVAILABLE_MODELS",
+            "code=openai/qwen3-coder:30b;fast=openai/qwen3.5:9b;small=openai/llama3.2:3b",
+        );
+
+        let report = format_model_report("openai/qwen3-coder:30b", 0, 0);
+        assert!(report.contains("Available models"));
+        assert!(report.contains("code             openai/qwen3-coder:30b"));
+        assert!(report.contains("fast             openai/qwen3.5:9b"));
+        assert!(report.contains("small            openai/llama3.2:3b"));
+        assert!(report
+            .contains("You can also use aliases from Available models, for example /model fast"));
+
+        match original_lang {
+            Some(value) => std::env::set_var("CLAW_UI_LANG", value),
+            None => std::env::remove_var("CLAW_UI_LANG"),
+        }
+        match original_available {
+            Some(value) => std::env::set_var("CLAW_AVAILABLE_MODELS", value),
+            None => std::env::remove_var("CLAW_AVAILABLE_MODELS"),
+        }
+    }
+
+    #[test]
+    fn model_report_uses_ukrainian_available_models_labels() {
+        let _guard = env_lock();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        let original_available = std::env::var_os("CLAW_AVAILABLE_MODELS");
+        std::env::set_var("CLAW_UI_LANG", "uk");
+        std::env::set_var(
+            "CLAW_AVAILABLE_MODELS",
+            "code=openai/qwen3-coder:30b;fast=openai/qwen3.5:9b",
+        );
+
+        let report = format_model_report("openai/qwen3-coder:30b", 0, 0);
+        assert!(report.contains("Модель"));
+        assert!(report.contains("Доступні моделі"));
+        assert!(report.contains("Поточна модель"));
+        assert!(report.contains("code             openai/qwen3-coder:30b"));
+        assert!(report.contains(
+            "Також можна використовувати псевдоніми з доступних моделей, наприклад /model fast"
+        ));
+
+        match original_lang {
+            Some(value) => std::env::set_var("CLAW_UI_LANG", value),
+            None => std::env::remove_var("CLAW_UI_LANG"),
+        }
+        match original_available {
+            Some(value) => std::env::set_var("CLAW_AVAILABLE_MODELS", value),
+            None => std::env::remove_var("CLAW_AVAILABLE_MODELS"),
+        }
+    }
+
+    #[test]
+    fn parses_available_models_env_and_resolves_slash_aliases() {
+        let _guard = env_lock();
+        let original_available = std::env::var_os("CLAW_AVAILABLE_MODELS");
+        std::env::set_var(
+            "CLAW_AVAILABLE_MODELS",
+            "code=openai/qwen3-coder:30b; fast = openai/qwen3.5:9b ;broken;empty= ; =empty",
+        );
+
+        let entries = parse_available_models_env_value(
+            "code=openai/qwen3-coder:30b; fast = openai/qwen3.5:9b ;broken;empty= ; =empty",
+        );
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].alias, "code");
+        assert_eq!(entries[0].model, "openai/qwen3-coder:30b");
+        assert_eq!(entries[1].alias, "fast");
+        assert_eq!(entries[1].model, "openai/qwen3.5:9b");
+
+        assert_eq!(
+            resolve_available_model_alias("fast").as_deref(),
+            Some("openai/qwen3.5:9b")
+        );
+        assert_eq!(resolve_slash_model_name("fast"), "openai/qwen3.5:9b");
+        assert_eq!(
+            resolve_slash_model_name("openai/qwen3-coder:30b"),
+            "openai/qwen3-coder:30b"
+        );
+        assert_eq!(resolve_slash_model_name("unknown-model"), "unknown-model");
+
+        match original_available {
+            Some(value) => std::env::set_var("CLAW_AVAILABLE_MODELS", value),
+            None => std::env::remove_var("CLAW_AVAILABLE_MODELS"),
+        }
     }
 
     fn test_branch_freshness() -> super::BranchFreshness {
