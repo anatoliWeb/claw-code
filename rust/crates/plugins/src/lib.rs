@@ -1,4 +1,5 @@
 mod hooks;
+mod i18n;
 #[cfg(test)]
 pub mod test_isolation;
 
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
+pub use i18n::{load_plugin_i18n, translate_plugin_manifest, PluginI18nCatalog};
 
 const EXTERNAL_MARKETPLACE: &str = "external";
 const BUILTIN_MARKETPLACE: &str = "builtin";
@@ -62,6 +64,7 @@ pub struct PluginMetadata {
     pub source: String,
     pub default_enabled: bool,
     pub root: Option<PathBuf>,
+    pub i18n_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +132,8 @@ pub struct PluginManifest {
     pub tools: Vec<PluginToolManifest>,
     #[serde(default)]
     pub commands: Vec<PluginCommandManifest>,
+    #[serde(skip, default)]
+    pub i18n_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1184,7 +1189,7 @@ impl PluginManager {
         let temp_root = self.install_root().join(".tmp");
         let staged_source = materialize_source(&install_source, &temp_root)?;
         let cleanup_source = matches!(install_source, PluginInstallSource::GitUrl { .. });
-        let manifest = load_plugin_from_directory(&staged_source)?;
+        let manifest = load_untranslated_plugin_from_directory(&staged_source)?;
 
         let plugin_id = plugin_id(&manifest.name, EXTERNAL_MARKETPLACE);
         let install_path = self.install_root().join(sanitize_plugin_id(&plugin_id));
@@ -1269,7 +1274,7 @@ impl PluginManager {
         let temp_root = self.install_root().join(".tmp");
         let staged_source = materialize_source(&record.source, &temp_root)?;
         let cleanup_source = matches!(record.source, PluginInstallSource::GitUrl { .. });
-        let manifest = load_plugin_from_directory(&staged_source)?;
+        let manifest = load_untranslated_plugin_from_directory(&staged_source)?;
 
         if record.install_path.exists() {
             fs::remove_dir_all(&record.install_path)?;
@@ -1445,14 +1450,15 @@ impl PluginManager {
         let mut active_bundled_ids = BTreeSet::new();
 
         for source_root in bundled_plugins {
-            let manifest = load_plugin_from_directory(&source_root)?;
+            let manifest = load_untranslated_plugin_from_directory(&source_root)?;
             let plugin_id = plugin_id(&manifest.name, BUNDLED_MARKETPLACE);
             active_bundled_ids.insert(plugin_id.clone());
             let install_path = install_root.join(sanitize_plugin_id(&plugin_id));
             let now = unix_time_ms();
             let existing_record = registry.plugins.get(&plugin_id);
             let installed_copy_is_valid =
-                install_path.exists() && load_plugin_from_directory(&install_path).is_ok();
+                install_path.exists()
+                    && load_untranslated_plugin_from_directory(&install_path).is_ok();
             let needs_sync = existing_record.is_none_or(|record| {
                 record.kind != PluginKind::Bundled
                     || record.version != manifest.version
@@ -1609,6 +1615,7 @@ pub fn builtin_plugins() -> Vec<PluginDefinition> {
             source: BUILTIN_MARKETPLACE.to_string(),
             default_enabled: false,
             root: None,
+            i18n_warnings: Vec::new(),
         },
         hooks: PluginHooks::default(),
         lifecycle: PluginLifecycle::default(),
@@ -1623,6 +1630,7 @@ fn load_plugin_definition(
     marketplace: &str,
 ) -> Result<PluginDefinition, PluginError> {
     let manifest = load_plugin_from_directory(root)?;
+    let i18n_warnings = manifest.i18n_warnings.clone();
     let metadata = PluginMetadata {
         id: plugin_id(&manifest.name, marketplace),
         name: manifest.name,
@@ -1632,6 +1640,7 @@ fn load_plugin_definition(
         source,
         default_enabled: manifest.default_enabled,
         root: Some(root.to_path_buf()),
+        i18n_warnings,
     };
     let hooks = resolve_hooks(root, &manifest.hooks);
     let lifecycle = resolve_lifecycle(root, &manifest.lifecycle);
@@ -1659,6 +1668,15 @@ fn load_plugin_definition(
 }
 
 pub fn load_plugin_from_directory(root: &Path) -> Result<PluginManifest, PluginError> {
+    let mut manifest = load_untranslated_plugin_from_directory(root)?;
+    let lang = std::env::var("CLAW_UI_LANG").unwrap_or_else(|_| "en".to_string());
+    let catalog = load_plugin_i18n(root, &lang);
+    translate_plugin_manifest(&mut manifest, &catalog);
+    manifest.i18n_warnings = catalog.warnings().to_vec();
+    Ok(manifest)
+}
+
+fn load_untranslated_plugin_from_directory(root: &Path) -> Result<PluginManifest, PluginError> {
     load_manifest_from_directory(root)
 }
 
@@ -1810,6 +1828,7 @@ fn build_plugin_manifest(
         lifecycle: raw.lifecycle,
         tools,
         commands,
+        i18n_warnings: Vec::new(),
     })
 }
 
@@ -2384,6 +2403,13 @@ mod tests {
         std::env::temp_dir().join(format!("plugins-{label}-{nanos}"))
     }
 
+    fn workspace_tools_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("workspace-tools")
+    }
+
     #[test]
     fn env_guard_recovers_after_poisoning() {
         let poisoned = std::thread::spawn(|| {
@@ -2623,16 +2649,180 @@ mod tests {
     }
 
     #[test]
+    fn plugin_without_i18n_loads_as_before() {
+        let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "uk");
+        let root = temp_dir("manifest-without-i18n");
+        write_loader_plugin(&root);
+
+        let manifest = load_plugin_from_directory(&root).expect("manifest should load");
+        assert_eq!(manifest.description, "Manifest loader test plugin");
+        assert_eq!(manifest.tools[0].description, "Echoes JSON input");
+        assert!(manifest.i18n_warnings.is_empty());
+
+        match original_lang {
+            Some(value) => std::env::set_var("CLAW_UI_LANG", value),
+            None => std::env::remove_var("CLAW_UI_LANG"),
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugin_i18n_translates_descriptions_with_en_and_manifest_fallbacks() {
+        let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "uk-UA");
+        let root = workspace_tools_fixture();
+
+        let manifest = load_plugin_from_directory(&root).expect("localized manifest should load");
+        assert_eq!(manifest.name, "workspace-tools");
+        assert_eq!(
+            manifest.description,
+            "Безпечні інструменти workspace для Claw Code."
+        );
+        assert_eq!(manifest.tools[0].name, "project_tree");
+        assert_eq!(
+            manifest.tools[0].description,
+            "Показує компактне дерево поточного проєкту."
+        );
+        assert_eq!(
+            manifest.tools[0].input_schema["description"],
+            "Параметри відображення дерева проєкту."
+        );
+        assert_eq!(
+            manifest.tools[0].input_schema["properties"]["max_depth"]["description"],
+            "Максимальна глибина дерева. За замовчуванням: 3."
+        );
+        assert_eq!(
+            manifest.tools[0].input_schema["properties"]["show_hidden"]["description"],
+            "Original hidden files setting."
+        );
+        assert_eq!(manifest.commands[0].name, "tree");
+        assert_eq!(
+            manifest.commands[0].description,
+            "Print the workspace tree."
+        );
+        assert!(manifest.i18n_warnings.is_empty());
+
+        let definition = load_plugin_definition(
+            &root,
+            PluginKind::External,
+            root.display().to_string(),
+            EXTERNAL_MARKETPLACE,
+        )
+        .expect("plugin definition should load");
+        assert_eq!(definition.metadata().id, "workspace-tools@external");
+        assert_eq!(definition.metadata().name, "workspace-tools");
+        assert_eq!(
+            definition.tools()[0]
+                .definition()
+                .description
+                .as_deref(),
+            Some("Показує компактне дерево поточного проєкту.")
+        );
+        assert_eq!(
+            definition.tools()[0].definition().input_schema["properties"]["max_depth"]
+                ["description"],
+            "Максимальна глибина дерева. За замовчуванням: 3."
+        );
+
+        match original_lang {
+            Some(value) => std::env::set_var("CLAW_UI_LANG", value),
+            None => std::env::remove_var("CLAW_UI_LANG"),
+        }
+    }
+
+    #[test]
+    fn invalid_plugin_i18n_warns_and_falls_back_without_breaking_loading() {
+        let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "uk");
+        let root = temp_dir("manifest-invalid-i18n");
+        write_loader_plugin(&root);
+        write_file(
+            root.join("i18n").join("en.properties").as_path(),
+            "plugin.description=English fallback description\n",
+        );
+        write_file(
+            root.join("i18n").join("uk.properties").as_path(),
+            "this line is invalid\nplugin.description=Непридатний переклад\n",
+        );
+
+        let manifest = load_plugin_from_directory(&root).expect("invalid i18n must not fail plugin");
+        assert_eq!(manifest.description, "English fallback description");
+        assert_eq!(manifest.name, "loader-demo");
+        assert_eq!(manifest.i18n_warnings.len(), 1);
+        assert!(manifest.i18n_warnings[0].contains("uk.properties"));
+        assert!(manifest.i18n_warnings[0].contains("expected key=value"));
+
+        match original_lang {
+            Some(value) => std::env::set_var("CLAW_UI_LANG", value),
+            None => std::env::remove_var("CLAW_UI_LANG"),
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_registry_keeps_original_description_while_runtime_uses_i18n() {
+        let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "uk");
+        let config_home = temp_dir("i18n-registry-home");
+        let root = workspace_tools_fixture();
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+
+        let outcome = manager
+            .install(root.to_str().expect("fixture path should be utf8"))
+            .expect("fixture plugin should install");
+        let registry = manager.load_registry().expect("registry should load");
+        assert_eq!(
+            registry.plugins[&outcome.plugin_id].description,
+            "Original workspace helper tools."
+        );
+
+        let summaries = manager
+            .list_installed_plugins()
+            .expect("installed plugin should list");
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.metadata.name == "workspace-tools")
+            .expect("workspace-tools summary should exist");
+        assert_eq!(summary.metadata.name, "workspace-tools");
+        assert_eq!(
+            summary.metadata.description,
+            "Безпечні інструменти workspace для Claw Code."
+        );
+
+        match original_lang {
+            Some(value) => std::env::set_var("CLAW_UI_LANG", value),
+            None => std::env::remove_var("CLAW_UI_LANG"),
+        }
+        let _ = fs::remove_dir_all(config_home);
+    }
+
+    #[test]
     fn load_plugin_from_directory_supports_packaged_manifest_path() {
         let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "uk");
         let root = temp_dir("manifest-packaged");
         write_external_plugin(&root, "packaged-demo", "1.0.0");
+        write_file(
+            root.join("i18n").join("uk.properties").as_path(),
+            "plugin.description=Локалізований packaged plugin\n",
+        );
 
         let manifest = load_plugin_from_directory(&root).expect("packaged manifest should load");
         assert_eq!(manifest.name, "packaged-demo");
+        assert_eq!(manifest.description, "Локалізований packaged plugin");
         assert!(manifest.tools.is_empty());
         assert!(manifest.commands.is_empty());
 
+        match original_lang {
+            Some(value) => std::env::set_var("CLAW_UI_LANG", value),
+            None => std::env::remove_var("CLAW_UI_LANG"),
+        }
         let _ = fs::remove_dir_all(root);
     }
 

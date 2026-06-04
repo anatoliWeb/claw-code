@@ -3228,6 +3228,10 @@ pub fn render_plugins_report(plugins: &[PluginSummary]) -> String {
             name = plugin.metadata.name,
             version = plugin.metadata.version,
         ));
+        lines.push(format!("    {}", plugin.metadata.description));
+        for warning in &plugin.metadata.i18n_warnings {
+            lines.push(format!("    Warning: {warning}"));
+        }
     }
     lines.join("\n")
 }
@@ -3254,6 +3258,10 @@ pub fn render_plugins_report_with_failures(
                 name = plugin.metadata.name,
                 version = plugin.metadata.version,
             ));
+            lines.push(format!("    {}", plugin.metadata.description));
+            for warning in &plugin.metadata.i18n_warnings {
+                lines.push(format!("    Warning: {warning}"));
+            }
         }
     }
 
@@ -5768,6 +5776,7 @@ mod tests {
                     source: "demo".to_string(),
                     default_enabled: false,
                     root: None,
+                    i18n_warnings: Vec::new(),
                 },
                 enabled: true,
                 lifecycle: PluginLifecycle::default(),
@@ -5782,6 +5791,7 @@ mod tests {
                     source: "sample".to_string(),
                     default_enabled: false,
                     root: None,
+                    i18n_warnings: Vec::new(),
                 },
                 enabled: false,
                 lifecycle: PluginLifecycle::default(),
@@ -5791,9 +5801,11 @@ mod tests {
         assert!(rendered.contains("demo"));
         assert!(rendered.contains("v1.2.3"));
         assert!(rendered.contains("enabled"));
+        assert!(rendered.contains("demo plugin"));
         assert!(rendered.contains("sample"));
         assert!(rendered.contains("v0.9.0"));
         assert!(rendered.contains("disabled"));
+        assert!(rendered.contains("sample plugin"));
     }
 
     #[test]
@@ -5809,6 +5821,9 @@ mod tests {
                     source: "demo".to_string(),
                     default_enabled: false,
                     root: None,
+                    i18n_warnings: vec![
+                        "failed to load plugin translations from `i18n/uk.properties`".to_string(),
+                    ],
                 },
                 enabled: true,
                 lifecycle: PluginLifecycle::default(),
@@ -5822,6 +5837,8 @@ mod tests {
         );
 
         assert!(rendered.contains("Warnings:"));
+        assert!(rendered.contains("demo plugin"));
+        assert!(rendered.contains("failed to load plugin translations"));
         assert!(rendered.contains("Failed to load external plugin"));
         assert!(rendered.contains("/tmp/broken-plugin"));
         assert!(rendered.contains("does not exist"));
@@ -6715,6 +6732,51 @@ mod tests {
         assert!(list.message.contains("v1.0.0"));
         assert!(list.message.contains("enabled"));
 
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn plugin_list_and_show_use_plugin_i18n_descriptions() {
+        let _guard = env_guard();
+        let original_lang = std::env::var_os("CLAW_UI_LANG");
+        std::env::set_var("CLAW_UI_LANG", "uk");
+        let config_home = temp_dir("i18n-home");
+        let source_root = temp_dir("i18n-source");
+        write_external_plugin(&source_root, "workspace-tools", "1.0.0");
+        fs::create_dir_all(source_root.join("i18n")).expect("i18n dir");
+        fs::write(
+            source_root.join("i18n").join("uk.properties"),
+            "plugin.description=Безпечні інструменти workspace для Claw Code.\n",
+        )
+        .expect("write translations");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        handle_plugins_slash_command(
+            Some("install"),
+            Some(source_root.to_str().expect("utf8 path")),
+            &mut manager,
+        )
+        .expect("install command should succeed");
+
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+            .expect("list command should succeed");
+        assert!(list.message.contains("workspace-tools"));
+        assert!(list
+            .message
+            .contains("Безпечні інструменти workspace для Claw Code."));
+
+        let show = handle_plugins_slash_command(
+            Some("show"),
+            Some("workspace-tools@external"),
+            &mut manager,
+        )
+        .expect("show command should succeed");
+        assert!(show
+            .message
+            .contains("Безпечні інструменти workspace для Claw Code."));
+
+        restore_env_var("CLAW_UI_LANG", original_lang);
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(source_root);
     }

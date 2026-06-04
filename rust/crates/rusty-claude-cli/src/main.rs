@@ -527,14 +527,18 @@ fn plugin_command_json(
     report: &plugins::PluginRegistryReport,
 ) -> Value {
     let failures = report.failures();
+    let summaries = report.summaries();
+    let has_i18n_warnings = summaries
+        .iter()
+        .any(|plugin| !plugin.metadata.i18n_warnings.is_empty());
     json!({
         "kind": "plugin",
         "action": action,
         "target": target,
-        "status": if failures.is_empty() { "ok" } else { "degraded" },
+        "status": if failures.is_empty() && !has_i18n_warnings { "ok" } else { "degraded" },
         "message": result.message,
         "reload_runtime": result.reload_runtime,
-        "plugins": report.summaries().iter().map(plugin_summary_json).collect::<Vec<_>>(),
+        "plugins": summaries.iter().map(plugin_summary_json).collect::<Vec<_>>(),
         "load_failures": failures.iter().map(plugin_load_failure_json).collect::<Vec<_>>(),
     })
 }
@@ -547,6 +551,7 @@ fn plugin_summary_json(plugin: &plugins::PluginSummary) -> Value {
         "description": &plugin.metadata.description,
         "kind": plugin.metadata.kind.to_string(),
         "source": &plugin.metadata.source,
+        "i18n_warnings": &plugin.metadata.i18n_warnings,
         // #730: path parity with agents (#728) and skills (#729)
         "path": plugin.metadata.root.as_ref().map(|p| p.display().to_string()),
         "enabled": plugin.enabled,

@@ -1,0 +1,34 @@
+{
+  "name": "workspace-tools",
+  "version": "0.1.0",
+  "description": "Original workspace helper tools.",
+  "tools": [
+    {
+      "name": "project_tree",
+      "description": "Original project tree description.",
+      "inputSchema": {
+        "type": "object",
+        "description": "Original project tree input.",
+        "properties": {
+          "max_depth": {
+            "type": "integer",
+            "description": "Original maximum depth."
+          },
+          "show_hidden": {
+            "type": "boolean",
+            "description": "Original hidden files setting."
+          }
+        }
+      },
+      "command": "scripts/project_tree.sh",
+      "requiredPermission": "read-only"
+    }
+  ],
+  "commands": [
+    {
+      "name": "tree",
+      "description": "Original tree command.",
+      "command": "scripts/project_tree.sh"
+    }
+  ]
+}
