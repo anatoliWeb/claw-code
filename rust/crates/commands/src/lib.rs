@@ -5020,23 +5020,23 @@ fn render_agents_usage(unexpected: Option<&str>) -> String {
     let mut lines = vec![
         ui_text("agents.title").to_string(),
         format!(
-            "  {:<16} /agents [list|show <name>|help]",
+            "  {:<16} /agents [list|show <name>|create <name>|help]",
             ui_text("agents.help.usage")
         ),
         format!(
-            "  {:<16} claw agents [list|show <name>|help]",
+            "  {:<16} claw agents [list|show <name>|create <name>|help]",
             ui_text("agents.help.direct_cli")
         ),
         format!(
-            "  {:<16} /workspace/.claw/agents/*.md or ./.claw/agents/*.md",
+            "  {:<16} /workspace/.claw/agents/*.md,*.toml or ./.claw/agents/*.md,*.toml",
             ui_text("agents.help.project_agents")
         ),
         format!(
-            "  {:<16} /root/.claw/agents/*.md or ~/.claw/agents/*.md",
+            "  {:<16} /root/.claw/agents/*.md,*.toml or ~/.claw/agents/*.md,*.toml",
             ui_text("agents.help.global_agents")
         ),
         format!(
-            "  {:<16} $CLAW_CONFIG_HOME/agents/*.md",
+            "  {:<16} $CLAW_CONFIG_HOME/agents/*.md,*.toml",
             ui_text("agents.help.config_agents")
         ),
         format!(
@@ -5065,16 +5065,21 @@ fn render_agents_usage_json(unexpected: Option<&str>) -> Value {
         "ok": unexpected.is_none(),
         "status": if unexpected.is_some() { "error" } else { "ok" },
         "usage": {
-            "slash_command": "/agents [list|show <name>|help]",
-            "direct_cli": "claw agents [list|show <name>|help]",
+            "slash_command": "/agents [list|show <name>|create <name>|help]",
+            "direct_cli": "claw agents [list|show <name>|create <name>|help]",
+            "create": "claw agents create <name>",
             "sources": [
                 "/workspace/.claw/agents",
                 ".claw/agents",
                 "/root/.claw/agents",
                 "~/.claw/agents",
+                "~/.codex/agents",
                 "$CLAW_CONFIG_HOME/agents"
             ],
-            "format": "one markdown file per agent; filename without .md is the agent name; first '# heading' is the title; first paragraph after the heading is the description",
+            "formats": ["toml", "markdown"],
+            "format": "toml or markdown",
+            "toml_format": "TOML files (.toml); create scaffolds .claw/agents/<name>.toml",
+            "markdown_format": "one markdown file per agent; filename without .md is the agent name; optional YAML frontmatter can set name, description, model, and model_reasoning_effort; first '# heading' is the title; first paragraph after the heading is the description",
             "example_path": ".claw/agents/pic-mplab-engineer.md",
             "example": "# PIC MPLAB Engineer\n\nShort description paragraph.\n\nAgent instructions go here.",
         },
@@ -5206,7 +5211,7 @@ fn render_mcp_usage_json(unexpected: Option<&str>) -> Value {
         "usage": {
             "slash_command": "/mcp [list|show <server>|help]",
             "direct_cli": "claw mcp [list|show <server>|help]",
-            "sources": [".claw/settings.json", ".claw/settings.local.json"],
+            "sources": [".claw.json", ".claw/settings.json", ".claw/settings.local.json"],
         },
         "unexpected": unexpected,
     })
@@ -5553,13 +5558,9 @@ mod tests {
         render_agents_report_json, render_mcp_report_json_for, render_plugins_report,
         render_plugins_report_with_failures, render_skills_report, render_slash_command_help,
         render_slash_command_help_detail, resolve_skill_path, resume_supported_slash_commands,
-<<<<<<< HEAD
         slash_command_specs, slash_command_summary, suggest_slash_commands,
-        ui_text, validate_slash_command_input,
-=======
-        slash_command_specs, suggest_slash_commands, validate_slash_command_input, AgentCollection,
->>>>>>> 58a30f6 (fix: accept markdown agent definitions with YAML frontmatter)
-        DefinitionSource, SkillOrigin, SkillRoot, SkillSlashDispatch, SlashCommand,
+        ui_text, validate_slash_command_input, AgentCollection, DefinitionSource, SkillOrigin,
+        SkillRoot, SkillSlashDispatch, SlashCommand,
     };
     use plugins::{
         PluginError, PluginKind, PluginLifecycle, PluginLoadFailure, PluginManager,
@@ -7263,7 +7264,7 @@ mod tests {
         let help =
             render_mcp_report_json_for(&loader, &workspace, Some("help")).expect("mcp help json");
         assert_eq!(help["action"], "help");
-        assert_eq!(help["usage"]["sources"][0], ".claw/settings.json");
+        assert_eq!(help["usage"]["sources"][0], ".claw.json");
 
         let _ = fs::remove_dir_all(workspace);
         let _ = fs::remove_dir_all(config_home);
