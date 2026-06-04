@@ -2716,6 +2716,7 @@ fn suggest_similar_subcommand(input: &str) -> Option<Vec<String>> {
         "init",
         "export",
         "prompt",
+        "list",
     ];
 
     let normalized_input = input.to_ascii_lowercase();
