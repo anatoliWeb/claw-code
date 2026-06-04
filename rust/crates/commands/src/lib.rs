@@ -2249,7 +2249,7 @@ impl DefinitionSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentSummary {
+pub(crate) struct AgentSummary {
     name: String,
     title: Option<String>,
     description: Option<String>,
@@ -2259,6 +2259,20 @@ struct AgentSummary {
     shadowed_by: Option<DefinitionSource>,
     // #728: on-disk path so `agents show` can surface the file path
     path: Option<PathBuf>,
+}
+
+/// An agent definition file that could not be loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InvalidAgentConfig {
+    pub(crate) path: PathBuf,
+    pub(crate) reason: String,
+}
+
+/// Loaded agent definitions plus any invalid entries that were skipped.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AgentCollection {
+    pub(crate) agents: Vec<AgentSummary>,
+    pub(crate) invalid_agents: Vec<InvalidAgentConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2611,8 +2625,8 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
     match normalize_optional_args(args) {
         None | Some("list") => {
             let roots = discover_definition_roots(cwd, "agents");
-            let agents = load_agents_from_roots(&roots)?;
-            Ok(render_agents_report_json(cwd, &agents))
+            let collection = load_agents_from_roots_with_invalids(&roots)?;
+            Ok(render_agents_report_json(cwd, &collection))
         }
         Some(args) if args.starts_with("list ") => {
             let filter = args["list ".len()..].trim().to_lowercase();
@@ -2633,17 +2647,26 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                 }));
             }
             let roots = discover_definition_roots(cwd, "agents");
-            let agents = load_agents_from_roots(&roots)?;
-            let filtered: Vec<_> = agents
+            let collection = load_agents_from_roots_with_invalids(&roots)?;
+            let filtered_agents: Vec<_> = collection
+                .agents
                 .into_iter()
                 .filter(|a| a.name.to_lowercase().contains(&filter))
                 .collect();
-            Ok(render_agents_report_json(cwd, &filtered))
+            let filtered_collection = AgentCollection {
+                agents: filtered_agents,
+                invalid_agents: collection.invalid_agents,
+            };
+            Ok(render_agents_report_json(cwd, &filtered_collection))
         }
         Some("show" | "info" | "describe") => {
             let roots = discover_definition_roots(cwd, "agents");
-            let agents = load_agents_from_roots(&roots)?;
-            Ok(render_agents_report_json_with_action(cwd, &agents, "show"))
+            let collection = load_agents_from_roots_with_invalids(&roots)?;
+            Ok(render_agents_report_json_with_action(
+                cwd,
+                &collection,
+                "show",
+            ))
         }
         Some(args)
             if args.starts_with("show ")
@@ -2678,8 +2701,9 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                 }));
             }
             let roots = discover_definition_roots(cwd, "agents");
-            let agents = load_agents_from_roots(&roots)?;
-            let matched: Vec<_> = agents
+            let collection = load_agents_from_roots_with_invalids(&roots)?;
+            let matched: Vec<_> = collection
+                .agents
                 .into_iter()
                 .filter(|a| a.name.to_lowercase() == name)
                 .collect();
@@ -2696,7 +2720,15 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "hint": ui_text("agents.hint.list_available"),
                 }));
             }
-            Ok(render_agents_report_json_with_action(cwd, &matched, "show"))
+            let matched_collection = AgentCollection {
+                agents: matched,
+                invalid_agents: collection.invalid_agents,
+            };
+            Ok(render_agents_report_json_with_action(
+                cwd,
+                &matched_collection,
+                "show",
+            ))
         }
         Some("create") => Ok(render_agents_missing_argument_json("create", "agent_name")),
         Some(args) if args.starts_with("create ") => {
@@ -4039,24 +4071,41 @@ fn push_unique_skill_root(
 fn load_agents_from_roots(
     roots: &[(DefinitionSource, PathBuf)],
 ) -> std::io::Result<Vec<AgentSummary>> {
+    let collection = load_agents_from_roots_with_invalids(roots)?;
+    Ok(collection.agents)
+}
+
+/// Load agent definitions from all roots, collecting both valid agents and
+/// invalid entries (wrong extension, broken frontmatter, etc.).
+fn load_agents_from_roots_with_invalids(
+    roots: &[(DefinitionSource, PathBuf)],
+) -> std::io::Result<AgentCollection> {
     let mut agents = Vec::new();
+    let mut invalid_agents = Vec::new();
     let mut active_sources = BTreeMap::<String, DefinitionSource>::new();
 
     for (source, root) in roots {
         let mut root_agents = Vec::new();
+
         for entry in fs::read_dir(root)? {
             let entry = entry?;
             let path = entry.path();
-            let fallback_name = entry.path().file_stem().map_or_else(
+
+            let fallback_name = path.file_stem().map_or_else(
                 || entry.file_name().to_string_lossy().to_string(),
                 |stem| stem.to_string_lossy().to_string(),
             );
-            let Some(extension) = path.extension().map(|ext| ext.to_string_lossy()) else {
+
+            let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
                 continue;
             };
+
             let contents = fs::read_to_string(&path)?;
+            let contents = contents.trim_start_matches('\u{feff}').to_string();
+
             let summary = if extension.eq_ignore_ascii_case("toml") {
                 let name = parse_toml_string(&contents, "name").unwrap_or(fallback_name);
+
                 AgentSummary {
                     name: name.clone(),
                     title: Some(name),
@@ -4068,13 +4117,22 @@ fn load_agents_from_roots(
                     path: Some(path),
                 }
             } else if extension.eq_ignore_ascii_case("md") {
-                let (title, description) = parse_markdown_agent_summary(&contents);
+                let (frontmatter_name, frontmatter_description, model, reasoning_effort) =
+                    parse_agent_frontmatter(&contents);
+
+                let (markdown_title, markdown_description) =
+                    parse_markdown_agent_summary(&contents);
+
+                let name = frontmatter_name.unwrap_or_else(|| fallback_name.clone());
+                let title = markdown_title.or_else(|| Some(name.clone()));
+                let description = frontmatter_description.or(markdown_description);
+
                 AgentSummary {
-                    name: fallback_name.clone(),
-                    title: title.or_else(|| Some(fallback_name.clone())),
+                    name,
+                    title,
                     description,
-                    model: None,
-                    reasoning_effort: None,
+                    model,
+                    reasoning_effort,
                     source: *source,
                     shadowed_by: None,
                     path: Some(path),
@@ -4082,22 +4140,29 @@ fn load_agents_from_roots(
             } else {
                 continue;
             };
+
             root_agents.push(summary);
         }
+
         root_agents.sort_by(|left, right| left.name.cmp(&right.name));
 
         for mut agent in root_agents {
             let key = agent.name.to_ascii_lowercase();
+
             if let Some(existing) = active_sources.get(&key) {
                 agent.shadowed_by = Some(*existing);
             } else {
                 active_sources.insert(key, agent.source);
             }
+
             agents.push(agent);
         }
     }
 
-    Ok(agents)
+    Ok(AgentCollection {
+        agents,
+        invalid_agents,
+    })
 }
 
 fn parse_markdown_agent_summary(contents: &str) -> (Option<String>, Option<String>) {
@@ -4297,6 +4362,63 @@ fn unquote_frontmatter_value(value: &str) -> String {
         .to_string()
 }
 
+/// Parse agent metadata from YAML frontmatter in `.md` agent files.
+/// Returns (name, description, model, reasoning_effort) extracted from
+/// the `---`-delimited YAML block at the top of the file.
+fn parse_agent_frontmatter(
+    contents: &str,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let mut lines = contents.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return (None, None, None, None);
+    }
+
+    let mut name = None;
+    let mut description = None;
+    let mut model = None;
+    let mut reasoning_effort = None;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("name:") {
+            let value = unquote_frontmatter_value(value.trim());
+            if !value.is_empty() {
+                name = Some(value);
+            }
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("description:") {
+            let value = unquote_frontmatter_value(value.trim());
+            if !value.is_empty() {
+                description = Some(value);
+            }
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("model:") {
+            let value = unquote_frontmatter_value(value.trim());
+            if !value.is_empty() {
+                model = Some(value);
+            }
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("model_reasoning_effort:") {
+            let value = unquote_frontmatter_value(value.trim());
+            if !value.is_empty() {
+                reasoning_effort = Some(value);
+            }
+        }
+    }
+
+    (name, description, model, reasoning_effort)
+}
+
 fn render_agents_report(agents: &[AgentSummary]) -> String {
     if agents.is_empty() {
         return ui_text("agents.none").to_string();
@@ -4320,31 +4442,42 @@ fn render_agents_report(agents: &[AgentSummary]) -> String {
     lines.join("\n").trim_end().to_string()
 }
 
-fn render_agents_report_json(cwd: &Path, agents: &[AgentSummary]) -> Value {
-    render_agents_report_json_with_action(cwd, agents, "list")
+fn render_agents_report_json(cwd: &Path, collection: &AgentCollection) -> Value {
+    render_agents_report_json_with_action(cwd, collection, "list")
 }
 
 fn render_agents_report_json_with_action(
     cwd: &Path,
-    agents: &[AgentSummary],
+    collection: &AgentCollection,
     action: &str,
 ) -> Value {
+    let agents = &collection.agents;
+    let invalid_agents = &collection.invalid_agents;
     let active = agents
         .iter()
         .filter(|agent| agent.shadowed_by.is_none())
         .count();
+    let has_invalids = !invalid_agents.is_empty();
+    let status = if has_invalids { "degraded" } else { "ok" };
     json!({
         "kind": "agents",
-        "status": "ok",
+        "status": status,
         "action": action,
         "working_directory": cwd.display().to_string(),
         "count": agents.len(),
+        "valid_count": agents.len(),
+        "invalid_count": invalid_agents.len(),
         "summary": {
             "total": agents.len(),
             "active": active,
             "shadowed": agents.len().saturating_sub(active),
         },
         "agents": agents.iter().map(agent_summary_json).collect::<Vec<_>>(),
+        "invalid_agents": invalid_agents.iter().map(|invalid| json!({
+            "path": invalid.path.display().to_string(),
+            "reason": &invalid.reason,
+            "valid": false,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -5342,8 +5475,12 @@ mod tests {
         render_agents_report_json, render_mcp_report_json_for, render_plugins_report,
         render_plugins_report_with_failures, render_skills_report, render_slash_command_help,
         render_slash_command_help_detail, resolve_skill_path, resume_supported_slash_commands,
+<<<<<<< HEAD
         slash_command_specs, slash_command_summary, suggest_slash_commands,
         ui_text, validate_slash_command_input,
+=======
+        slash_command_specs, suggest_slash_commands, validate_slash_command_input, AgentCollection,
+>>>>>>> 58a30f6 (fix: accept markdown agent definitions with YAML frontmatter)
         DefinitionSource, SkillOrigin, SkillRoot, SkillSlashDispatch, SlashCommand,
     };
     use plugins::{
@@ -6515,7 +6652,10 @@ mod tests {
         ];
         let report = render_agents_report_json(
             &workspace,
-            &load_agents_from_roots(&roots).expect("agent roots should load"),
+            &AgentCollection {
+                agents: load_agents_from_roots(&roots).expect("agent roots should load"),
+                invalid_agents: Vec::new(),
+            },
         );
 
         assert_eq!(report["kind"], "agents");
