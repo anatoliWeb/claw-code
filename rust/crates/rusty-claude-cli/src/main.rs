@@ -1255,6 +1255,7 @@ enum CliAction {
         permission_mode: PermissionModeProvenance,
         output_format: CliOutputFormat,
         allowed_tools: Option<AllowedToolSet>,
+
     },
     Sandbox {
         output_format: CliOutputFormat,
@@ -1391,9 +1392,28 @@ impl Default for OutputFormatSelection {
 }
 
 static OUTPUT_FORMAT_SELECTION: OnceLock<Mutex<OutputFormatSelection>> = OnceLock::new();
+// #468: duplicate global flag occurrences for provenance reporting
+static DUPLICATE_FLAGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 fn output_format_selection_cell() -> &'static Mutex<OutputFormatSelection> {
     OUTPUT_FORMAT_SELECTION.get_or_init(|| Mutex::new(OutputFormatSelection::default()))
+}
+
+fn duplicate_flags_cell() -> &'static Mutex<Vec<String>> {
+    DUPLICATE_FLAGS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn push_duplicate_flag(flag: &str) {
+    if let Ok(mut flags) = duplicate_flags_cell().lock() {
+        flags.push(flag.to_string());
+    }
+}
+
+fn take_duplicate_flags() -> Vec<String> {
+    duplicate_flags_cell()
+        .lock()
+        .map(|mut flags| std::mem::take(&mut *flags))
+        .unwrap_or_default()
 }
 
 fn set_current_output_format_selection(selection: &OutputFormatSelection) {
@@ -1516,6 +1536,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     let mut base_commit: Option<String> = None;
     let mut reasoning_effort: Option<String> = None;
     let mut allow_broad_cwd = false;
+
     // #755: -p prompt text captured as single token; remaining args continue
     // flag parsing. None until `-p <text>` is seen.
     let mut short_p_prompt: Option<String> = None;
@@ -1552,6 +1573,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| "missing_flag_value: missing value for --model.\nUsage: --model <provider/model>  e.g. --model anthropic/claude-opus-4-7".to_string())?;
+                // #468: track duplicate --model flags
+                if model_flag_raw.is_some() {
+                    push_duplicate_flag(&format!("--model (previous: {}, new: {})", model_flag_raw.as_deref().unwrap_or(""), value));
+                }
                 let resolved = resolve_model_alias_with_config(value);
                 debug!("Resolved --model '{}' -> '{}'", value, resolved);
                 validate_model_syntax(&resolved)?;
@@ -1559,6 +1584,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 model_flag_raw = Some(value.clone()); // #148
                 index += 2;
             }
+
             flag if flag.starts_with("--model=") => {
                 let value = &flag[8..];
                 let resolved = resolve_model_alias_with_config(value);
@@ -1572,6 +1598,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| "missing_flag_value: missing value for --output-format.\nUsage: --output-format text  or  --output-format json".to_string())?;
+                // #468: track duplicate --output-format flags
+                if output_format != CliOutputFormat::Text || output_format_selection.format != CliOutputFormat::Text {
+                    push_duplicate_flag("--output-format (overwriting previous value)");
+                }
                 output_format = apply_output_format_flag(&mut output_format_selection, value)?;
                 index += 2;
             }
@@ -1579,9 +1609,14 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| "missing_flag_value: missing value for --permission-mode.\nUsage: --permission-mode read-only|workspace-write|danger-full-access".to_string())?;
+                // #468: track duplicate --permission-mode flags
+                if permission_mode_override.is_some() {
+                    push_duplicate_flag("--permission-mode (overwriting previous value)");
+                }
                 permission_mode_override = Some(parse_permission_mode_arg(value)?);
                 index += 2;
             }
+
             flag if flag.starts_with("--output-format=") => {
                 output_format =
                     apply_output_format_flag(&mut output_format_selection, &flag[16..])?;
@@ -3621,7 +3656,9 @@ fn render_doctor_report(
         config_load_error: config.as_ref().err().map(ToString::to_string),
         config_load_error_kind: None,
         mcp_validation: mcp_validation.clone(),
+
         hook_validation: hook_validation.clone(),
+        duplicate_flags: Vec::new(),
     };
     Ok(DoctorReport {
         checks: vec![
@@ -5274,7 +5311,10 @@ struct StatusContext {
     /// instead of regex-scraping the prose.
     config_load_error_kind: Option<&'static str>,
     mcp_validation: McpValidationSummary,
+
     hook_validation: HookValidationSummary,
+    /// #468: duplicate global flag occurrences for provenance reporting
+    duplicate_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9319,6 +9359,8 @@ fn status_json_value(
         "config_load_error_kind": context.config_load_error_kind,
         "mcp_validation": context.mcp_validation.json_value(),
         "hook_validation": context.hook_validation.json_value(),
+        "duplicate_flags": context.duplicate_flags,
+
         "model": model,
         "model_source": model_source,
         "model_raw": model_raw,
@@ -9495,7 +9537,9 @@ fn status_context(
         config_load_error,
         config_load_error_kind,
         mcp_validation,
+
         hook_validation,
+        duplicate_flags: take_duplicate_flags(),
     })
 }
 
@@ -17256,7 +17300,9 @@ mod tests {
                 config_load_error: None,
                 config_load_error_kind: None,
                 mcp_validation: super::McpValidationSummary::default(),
+
                 hook_validation: super::HookValidationSummary::default(),
+                duplicate_flags: Vec::new(),
             },
             None, // #148
             None,
@@ -17408,7 +17454,9 @@ mod tests {
             config_load_error: None,
             config_load_error_kind: None,
             mcp_validation: super::McpValidationSummary::default(),
+
             hook_validation: super::HookValidationSummary::default(),
+            duplicate_flags: Vec::new(),
         };
 
         let check = super::check_workspace_health(&context);
@@ -17459,7 +17507,9 @@ mod tests {
             config_load_error: None,
             config_load_error_kind: None,
             mcp_validation: super::McpValidationSummary::default(),
+
             hook_validation: super::HookValidationSummary::default(),
+            duplicate_flags: Vec::new(),
         };
 
         let check = super::check_memory_health(&context);
@@ -17502,7 +17552,9 @@ mod tests {
             config_load_error: None,
             config_load_error_kind: None,
             mcp_validation: super::McpValidationSummary::default(),
+
             hook_validation: super::HookValidationSummary::default(),
+            duplicate_flags: Vec::new(),
         };
 
         let value = status_json_value(
