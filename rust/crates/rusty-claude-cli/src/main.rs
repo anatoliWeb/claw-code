@@ -1081,7 +1081,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session_path,
             commands,
             output_format,
-        } => resume_session(&session_path, &commands, output_format),
+            allow_broad_cwd,
+        } => {
+            enforce_broad_cwd_policy(allow_broad_cwd, output_format)?;
+            resume_session(&session_path, &commands, output_format)
+        }
         CliAction::Status {
             model,
             model_flag_raw,
@@ -1236,6 +1240,7 @@ enum CliAction {
         session_path: PathBuf,
         commands: Vec<String>,
         output_format: CliOutputFormat,
+        allow_broad_cwd: bool,
     },
     Status {
         model: String,
@@ -1863,10 +1868,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         return action;
     }
     if rest.first().map(String::as_str) == Some("--resume") {
-        return parse_resume_args(&rest[1..], output_format);
+        return parse_resume_args(&rest[1..], output_format, allow_broad_cwd);
     }
     if rest.first().map(String::as_str) == Some("resume") {
-        return parse_resume_args(&rest[1..], output_format);
+        return parse_resume_args(&rest[1..], output_format, allow_broad_cwd);
     }
     // #696: `claw compact` is the bare name of the interactive `/compact`
     // slash command, not a prompt. When extra args such as `--help` appear
@@ -3222,7 +3227,11 @@ fn parse_dump_manifests_args(
     })
 }
 
-fn parse_resume_args(args: &[String], output_format: CliOutputFormat) -> Result<CliAction, String> {
+fn parse_resume_args(
+    args: &[String],
+    output_format: CliOutputFormat,
+    allow_broad_cwd: bool,
+) -> Result<CliAction, String> {
     let (session_path, command_tokens): (PathBuf, &[String]) = match args.first() {
         None => (PathBuf::from(LATEST_SESSION_REFERENCE), &[]),
         Some(first) if looks_like_slash_command_token(first) => {
@@ -3266,6 +3275,7 @@ fn parse_resume_args(args: &[String], output_format: CliOutputFormat) -> Result<
         session_path,
         commands,
         output_format,
+        allow_broad_cwd,
     })
 }
 
@@ -16489,6 +16499,7 @@ mod tests {
                 session_path: PathBuf::from("session.jsonl"),
                 commands: vec!["/compact".to_string()],
                 output_format: CliOutputFormat::Text,
+                allow_broad_cwd: false,
             }
         );
     }
@@ -16501,6 +16512,7 @@ mod tests {
                 session_path: PathBuf::from("latest"),
                 commands: vec![],
                 output_format: CliOutputFormat::Text,
+                allow_broad_cwd: false,
             }
         );
         assert_eq!(
@@ -16510,6 +16522,7 @@ mod tests {
                 session_path: PathBuf::from("latest"),
                 commands: vec!["/status".to_string()],
                 output_format: CliOutputFormat::Text,
+                allow_broad_cwd: false,
             }
         );
     }
@@ -16533,6 +16546,7 @@ mod tests {
                     "/cost".to_string(),
                 ],
                 output_format: CliOutputFormat::Text,
+                allow_broad_cwd: false,
             }
         );
     }
@@ -16564,6 +16578,7 @@ mod tests {
                     "/clear --confirm".to_string(),
                 ],
                 output_format: CliOutputFormat::Text,
+                allow_broad_cwd: false,
             }
         );
     }
@@ -16583,6 +16598,7 @@ mod tests {
                 session_path: PathBuf::from("session.jsonl"),
                 commands: vec!["/export /tmp/notes.txt".to_string(), "/status".to_string()],
                 output_format: CliOutputFormat::Text,
+                allow_broad_cwd: false,
             }
         );
     }
