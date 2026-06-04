@@ -9678,6 +9678,7 @@ fn sandbox_json_value(status: &runtime::SandboxStatus) -> serde_json::Value {
         "action": "status",
         "status": top_status,
         "enabled": status.enabled,
+        "requested": status.enabled,
         "active": status.active,
         "supported": status.supported,
         "in_container": status.in_container,
@@ -9690,6 +9691,11 @@ fn sandbox_json_value(status: &runtime::SandboxStatus) -> serde_json::Value {
         "allowed_mounts": status.allowed_mounts,
         "markers": status.container_markers,
         "fallback_reason": status.fallback_reason,
+        "active_components": {
+            "namespace": status.namespace_active,
+            "network": status.network_active,
+            "filesystem": status.filesystem_active,
+        },
     })
 }
 
