@@ -7016,12 +7016,13 @@ mod tests {
         let skills_help =
             super::handle_skills_slash_command(Some("--help"), &cwd).expect("skills help");
         assert!(skills_help.contains(
-            "Usage            /skills [list|show <name>|install <path>|uninstall <name>|help|<skill> [args]]"
+            "Usage            /skills [list|show <name>|install [--project] <path>|uninstall <name>|help|<skill> [args]]"
         ));
         assert!(skills_help.contains("Alias            /skill"));
         assert!(skills_help.contains("Lifecycle        install <path>, uninstall <name>"));
         assert!(skills_help.contains("Invoke           /skills help overview -> $help overview"));
-        assert!(skills_help.contains("Install root     $CLAW_CONFIG_HOME/skills or ~/.claw/skills"));
+        // #95: install root now mentions --project flag
+        assert!(skills_help.contains("Install root     $CLAW_CONFIG_HOME/skills or ~/.claw/skills (use --project for .claw/skills)"));
         assert!(skills_help.contains(".omc/skills"));
         assert!(skills_help.contains(".agents/skills"));
         assert!(skills_help.contains("~/.claude/skills/omc-learned"));
@@ -7034,7 +7035,7 @@ mod tests {
         let skills_install_help = super::handle_skills_slash_command(Some("install --help"), &cwd)
             .expect("nested skills help");
         assert!(skills_install_help.contains(
-            "Usage            /skills [list|show <name>|install <path>|uninstall <name>|help|<skill> [args]]"
+            "Usage            /skills [list|show <name>|install [--project] <path>|uninstall <name>|help|<skill> [args]]"
         ));
         assert!(skills_install_help.contains("Alias            /skill"));
         assert!(skills_install_help.contains("Unexpected       install"));
@@ -7042,7 +7043,7 @@ mod tests {
         let skills_unknown_help =
             super::handle_skills_slash_command(Some("show --help"), &cwd).expect("skills help");
         assert!(skills_unknown_help.contains(
-            "Usage            /skills [list|show <name>|install <path>|uninstall <name>|help|<skill> [args]]"
+            "Usage            /skills [list|show <name>|install [--project] <path>|uninstall <name>|help|<skill> [args]]"
         ));
         assert!(skills_unknown_help.contains("Unexpected       show"));
 
