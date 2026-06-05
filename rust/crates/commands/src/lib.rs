@@ -4575,6 +4575,59 @@ fn render_agents_report_json_with_action(
     })
 }
 
+fn render_agents_missing_argument_json(action: &str, argument: &str) -> Value {
+    json!({
+        "kind": "agents",
+        "action": action,
+        "status": "error",
+        "error_kind": "missing_argument",
+        "argument": argument,
+        "hint": "Usage: claw agents create <name>",
+    })
+}
+
+fn render_agent_create_report(agent: &CreatedAgent) -> String {
+    format!(
+        "Agents\n  Result           created {}\n  Path             {}\n  Format           TOML",
+        agent.name,
+        agent.path.display()
+    )
+}
+
+fn render_agent_create_report_json(agent: &CreatedAgent) -> Value {
+    json!({
+        "kind": "agents",
+        "status": "ok",
+        "action": "create",
+        "result": "created",
+        "name": &agent.name,
+        "path": agent.path.display().to_string(),
+        "format": "toml",
+    })
+}
+
+fn render_agent_create_error_json(name: &str, error: &std::io::Error) -> Value {
+    let message = error.to_string();
+    let error_kind = if message.starts_with("invalid_agent_name:") {
+        "invalid_agent_name"
+    } else if message.starts_with("agent_already_exists:")
+        || error.kind() == std::io::ErrorKind::AlreadyExists
+    {
+        "agent_already_exists"
+    } else {
+        "agent_create_failed"
+    };
+    json!({
+        "kind": "agents",
+        "status": "error",
+        "action": "create",
+        "error_kind": error_kind,
+        "name": name,
+        "message": message,
+        "hint": "Use `claw agents create <name>` with a simple alphanumeric, dash, underscore, or dot name.",
+    })
+}
+
 fn agent_source_type(agent: &AgentSummary) -> &'static str {
     match agent.source.report_scope() {
         DefinitionScope::Project => ui_text("agents.source.project"),
@@ -6654,7 +6707,11 @@ mod tests {
         assert!(report.contains("    Source: global"));
         assert!(report.contains("    Description: Reviews code across workspaces."));
 
-        let json = render_agents_report_json(&workspace, &agents);
+        let collection = AgentCollection {
+            agents,
+            invalid_agents: Vec::new(),
+        };
+        let json = render_agents_report_json(&workspace, &collection);
         assert_eq!(json["summary"]["active"], 2);
         assert_eq!(json["agents"][0]["name"], "pic-mplab-engineer");
         assert_eq!(json["agents"][0]["title"], "PIC MPLAB Engineer");
@@ -6991,8 +7048,13 @@ mod tests {
         assert!(agents_help.contains(
             "Format           TOML files (.toml); create scaffolds .claw/agents/<name>.toml"
         ));
-        assert!(agents_help
-            .contains("Sources          .claw/agents, ~/.claw/agents, $CLAW_CONFIG_HOME/agents"));
+        assert!(agents_help.contains(
+            "Project agents   /workspace/.claw/agents/*.md,*.toml or ./.claw/agents/*.md,*.toml"
+        ));
+        assert!(agents_help.contains(
+            "Global agents    /root/.claw/agents/*.md,*.toml or ~/.claw/agents/*.md,*.toml"
+        ));
+        assert!(agents_help.contains("Config agents    $CLAW_CONFIG_HOME/agents/*.md,*.toml"));
 
         // `show <name>` is now valid. For an agent that doesn't exist it returns Err(NotFound).
         let agents_show_missing =

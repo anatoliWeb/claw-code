@@ -14254,7 +14254,11 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-
+        "  --cwd PATH, -C PATH, --directory PATH  {}",
+        cli_text("flag.cwd")
+    )?;
+    writeln!(
+        out,
         "  --compact                  {}",
         cli_text("flag.compact")
     )?;
