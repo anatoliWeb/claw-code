@@ -17,6 +17,10 @@ use crate::usage::{TokenUsage, UsageTracker};
 
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
+const EMPTY_ASSISTANT_STREAM_ERROR: &str = "assistant stream produced no content";
+const EMPTY_POST_TOOL_ASSISTANT_FALLBACK: &str =
+    "Warning: assistant stream produced no content after tool execution.\n\
+Tool execution completed, but the model returned no final response.";
 
 /// Fully assembled request payload sent to the upstream model client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +362,7 @@ where
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
             };
+            let is_post_tool_request = request_ends_with_tool_result(&request);
             let events = match self.api_client.stream(request) {
                 Ok(events) => events,
                 Err(error) => {
@@ -368,6 +373,16 @@ where
             let (assistant_message, usage, turn_prompt_cache_events) =
                 match build_assistant_message(events) {
                     Ok(result) => result,
+                    Err(error)
+                        if is_empty_assistant_stream_error(&error)
+                            && is_post_tool_request =>
+                    {
+                        (
+                            fallback_empty_assistant_message(),
+                            None,
+                            Vec::new(),
+                        )
+                    }
                     Err(error) => {
                         self.record_turn_failed(iterations, &error);
                         return Err(error);
@@ -761,7 +776,7 @@ fn build_assistant_message(
         ));
     }
     if blocks.is_empty() {
-        return Err(RuntimeError::new("assistant stream produced no content"));
+        return Err(RuntimeError::new(EMPTY_ASSISTANT_STREAM_ERROR));
     }
 
     Ok((
@@ -769,6 +784,25 @@ fn build_assistant_message(
         usage,
         prompt_cache_events,
     ))
+}
+
+fn is_empty_assistant_stream_error(error: &RuntimeError) -> bool {
+    error.to_string().contains(EMPTY_ASSISTANT_STREAM_ERROR)
+}
+
+fn request_ends_with_tool_result(request: &ApiRequest) -> bool {
+    request.messages.last().is_some_and(|message| {
+        message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    })
+}
+
+fn fallback_empty_assistant_message() -> ConversationMessage {
+    ConversationMessage::assistant(vec![ContentBlock::Text {
+        text: EMPTY_POST_TOOL_ASSISTANT_FALLBACK.to_string(),
+    }])
 }
 
 fn flush_text_block(text: &mut String, blocks: &mut Vec<ContentBlock>) {
@@ -841,9 +875,10 @@ impl ToolExecutor for StaticToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_assistant_message, parse_auto_compaction_threshold, ApiClient, ApiRequest,
-        AssistantEvent, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError,
-        StaticToolExecutor, ToolExecutor, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
+        build_assistant_message, parse_auto_compaction_threshold, request_ends_with_tool_result,
+        ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent, ConversationRuntime,
+        PromptCacheEvent, RuntimeError, StaticToolExecutor, ToolExecutor,
+        DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
     };
     use crate::compact::CompactionConfig;
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
@@ -982,6 +1017,126 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn recovers_when_post_tool_assistant_stream_has_no_content() {
+        struct EmptyFinalApiClient {
+            call_count: usize,
+        }
+
+        impl ApiClient for EmptyFinalApiClient {
+            fn stream(
+                &mut self,
+                request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.call_count += 1;
+                match self.call_count {
+                    1 => Ok(vec![
+                        AssistantEvent::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "echo".to_string(),
+                            input: "hello".to_string(),
+                        },
+                        AssistantEvent::MessageStop,
+                    ]),
+                    2 => {
+                        assert!(request_ends_with_tool_result(&request));
+                        Ok(vec![AssistantEvent::MessageStop])
+                    }
+                    _ => unreachable!("extra API call"),
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            EmptyFinalApiClient { call_count: 0 },
+            StaticToolExecutor::new().register("echo", |_input| Ok("ok".to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("use echo", None)
+            .expect("empty post-tool assistant stream should be recoverable");
+
+        assert_eq!(summary.assistant_messages.len(), 2);
+        assert_eq!(summary.tool_results.len(), 1);
+        assert!(matches!(
+            summary.tool_results[0].blocks[0],
+            ContentBlock::ToolResult {
+                is_error: false,
+                ..
+            }
+        ));
+        let fallback = match &summary.assistant_messages[1].blocks[0] {
+            ContentBlock::Text { text } => text,
+            other => panic!("expected fallback text block, got {other:?}"),
+        };
+        assert!(fallback.contains("assistant stream produced no content after tool execution"));
+        assert_eq!(runtime.session().messages.len(), 4);
+    }
+
+    #[test]
+    fn recovers_tool_error_when_post_tool_assistant_stream_has_no_content() {
+        struct EmptyFinalApiClient {
+            call_count: usize,
+        }
+
+        impl ApiClient for EmptyFinalApiClient {
+            fn stream(
+                &mut self,
+                request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.call_count += 1;
+                match self.call_count {
+                    1 => Ok(vec![
+                        AssistantEvent::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "plugin_fail".to_string(),
+                            input: "{}".to_string(),
+                        },
+                        AssistantEvent::MessageStop,
+                    ]),
+                    2 => {
+                        assert!(request_ends_with_tool_result(&request));
+                        Ok(vec![AssistantEvent::MessageStop])
+                    }
+                    _ => unreachable!("extra API call"),
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            EmptyFinalApiClient { call_count: 0 },
+            StaticToolExecutor::new()
+                .register("plugin_fail", |_input| Err(ToolError::new("exit code 7: boom"))),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("use failing plugin", None)
+            .expect("tool errors should stay in-session when final stream is empty");
+
+        assert_eq!(summary.assistant_messages.len(), 2);
+        assert_eq!(summary.tool_results.len(), 1);
+        match &summary.tool_results[0].blocks[0] {
+            ContentBlock::ToolResult {
+                output, is_error, ..
+            } => {
+                assert!(*is_error);
+                assert!(output.contains("exit code 7"));
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+        let fallback = match &summary.assistant_messages[1].blocks[0] {
+            ContentBlock::Text { text } => text,
+            other => panic!("expected fallback text block, got {other:?}"),
+        };
+        assert!(fallback.contains("model returned no final response"));
     }
 
     #[test]

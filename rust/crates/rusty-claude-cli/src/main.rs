@@ -5136,12 +5136,12 @@ fn run_repl(
                 if let Some(prompt) = try_resolve_bare_skill_prompt(&cwd, &trimmed) {
                     editor.push_history(input);
                     cli.record_prompt_history(&trimmed);
-                    cli.run_turn(&prompt)?;
+                    run_repl_turn_with_recovery(&mut cli, &prompt)?;
                     continue;
                 }
                 editor.push_history(input);
                 cli.record_prompt_history(&trimmed);
-                cli.run_turn(&trimmed)?;
+                run_repl_turn_with_recovery(&mut cli, &trimmed)?;
             }
             input::ReadOutcome::Cancel => {}
             input::ReadOutcome::Exit => {
@@ -5152,6 +5152,45 @@ fn run_repl(
     }
 
     Ok(())
+}
+
+fn run_repl_turn_with_recovery(
+    cli: &mut LiveCli,
+    input: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match cli.run_turn(input) {
+        Ok(()) => Ok(()),
+        Err(error) if is_recoverable_repl_error(error.as_ref()) => {
+            eprintln!("{}", render_recoverable_error(error.as_ref()));
+            cli.persist_session()?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_recoverable_repl_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("assistant stream produced no content")
+        || message.contains("tool execution error")
+        || message.contains("tool execution failed")
+        || message.contains("plugin tool")
+}
+
+fn render_recoverable_error(error: &(dyn std::error::Error + 'static)) -> String {
+    let message = error.to_string();
+    if message.contains("assistant stream produced no content") {
+        return format!(
+            "{}\nYou can continue the session.",
+            fallback_empty_assistant_message()
+        );
+    }
+    format!("Warning: recoverable tool/model error.\n{message}\nYou can continue the session.")
+}
+
+fn fallback_empty_assistant_message() -> &'static str {
+    "Warning: assistant stream produced no content after tool execution.\n\
+Tool execution completed, but the model returned no final response."
 }
 
 #[derive(Debug, Clone)]
@@ -10852,6 +10891,9 @@ fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> String {
             ));
         }
     }
+    if lines.len() == 1 {
+        lines.push("Tool completed with empty output.".to_string());
+    }
 
     lines.join("\n\n")
 }
@@ -11035,7 +11077,7 @@ fn format_generic_tool_result(icon: &str, name: &str, parsed: &serde_json::Value
     );
 
     if preview.is_empty() {
-        format!("{icon} \x1b[38;5;245m{name}\x1b[0m")
+        format!("{icon} \x1b[38;5;245m{name}\x1b[0m\nTool completed with empty output.")
     } else if preview.contains('\n') {
         format!("{icon} \x1b[38;5;245m{name}\x1b[0m\n{preview}")
     } else {
@@ -11639,16 +11681,16 @@ mod tests {
         format_pr_report, format_resume_report, format_status_report, format_tool_call_start,
         format_tool_result, format_ultraplan_report, format_unknown_slash_command,
         format_unknown_slash_command_message, format_user_visible_api_error,
-        merge_prompt_with_stdin, normalize_permission_mode, parse_args,
+        is_recoverable_repl_error, merge_prompt_with_stdin, normalize_permission_mode, parse_args,
         parse_available_models_env_value, parse_export_args, parse_git_status_branch,
         parse_git_status_metadata_for, parse_git_workspace_summary, parse_history_count,
         permission_policy, print_help_to, push_output_block, render_config_report,
         render_diff_report, render_diff_report_for, render_help_topic, render_help_topic_json,
-        render_memory_report, render_prompt_history_report, render_repl_help, render_resume_usage,
-        render_session_list, render_session_markdown, resolve_available_model_alias,
-        resolve_model_alias, resolve_model_alias_with_config, resolve_repl_model,
-        resolve_session_reference, resolve_slash_model_name, response_to_events,
-        resume_supported_slash_commands, run_resume_command, short_tool_id,
+        render_memory_report, render_prompt_history_report, render_recoverable_error,
+        render_repl_help, render_resume_usage, render_session_list, render_session_markdown,
+        resolve_available_model_alias, resolve_model_alias, resolve_model_alias_with_config,
+        resolve_repl_model, resolve_session_reference, resolve_slash_model_name,
+        response_to_events, resume_supported_slash_commands, run_resume_command, short_tool_id,
         slash_command_completion_candidates_with_sessions,
         split_error_hint, status_context, status_json_value, summarize_tool_payload_for_markdown,
         try_resolve_bare_skill_prompt, validate_no_args, write_mcp_server_fixture, CliAction,
@@ -15981,6 +16023,38 @@ UU conflicted.rs",
         );
         assert!(done.contains("📄 Read src/main.rs"));
         assert!(done.contains("hello"));
+    }
+
+    #[test]
+    fn empty_tool_output_renders_explicit_message() {
+        let plugin = format_tool_result("plugin_empty", "", false);
+        assert!(plugin.contains("Tool completed with empty output."));
+
+        let bash = format_tool_result(
+            "bash",
+            &json!({
+                "stdout": "",
+                "stderr": "",
+                "returnCodeInterpretation": "completed successfully"
+            })
+            .to_string(),
+            false,
+        );
+        assert!(bash.contains("Tool completed with empty output."));
+    }
+
+    #[test]
+    fn recoverable_repl_empty_stream_error_renders_warning() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "assistant stream produced no content",
+        );
+
+        assert!(is_recoverable_repl_error(&error));
+        let rendered = render_recoverable_error(&error);
+        assert!(rendered.contains("Warning: assistant stream produced no content after tool execution."));
+        assert!(rendered.contains("You can continue the session."));
+        assert!(!rendered.contains("[error-kind:"));
     }
 
     #[test]
