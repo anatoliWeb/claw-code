@@ -19,3 +19,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Prefer small, reviewable changes and keep generated bootstrap files aligned with actual repo workflows.
 - Keep shared defaults in `.claude.json`; reserve `.claude/settings.local.json` for machine-local overrides.
 - Do not overwrite existing `CLAUDE.md` content automatically; update it intentionally when repo workflows change.
+## Fork sync safety
+
+Before syncing with upstream or rebasing this fork, read:
+`docs/fork-sync-workflow.md`
+
+Do not run `git rebase upstream/main` automatically.
+First run:
+`scripts/check-upstream-updates.ps1`
+
+Never push, reset hard, clean, skip rebase commits, or discard commits without explicit user confirmation.
