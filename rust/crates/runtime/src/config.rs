@@ -70,6 +70,62 @@ pub struct RuntimeConfig {
     feature_config: RuntimeFeatureConfig,
 }
 
+pub const MODEL_PROFILES_ENV_VAR: &str = "CLAW_MODEL_PROFILES_FILE";
+pub const DEFAULT_MODEL_PROFILES_PATH: &str = "/root/models/profiles.json";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelProfilesConfig {
+    pub version: u32,
+    pub default_profile: Option<String>,
+    pub profiles: Vec<ModelProfile>,
+}
+
+impl Default for ModelProfilesConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            default_profile: None,
+            profiles: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelProfile {
+    pub name: String,
+    pub provider: String,
+    pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
+    pub model: String,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelProfilesLoadReport {
+    pub path: PathBuf,
+    pub config: ModelProfilesConfig,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+impl ModelProfilesLoadReport {
+    #[must_use]
+    pub fn empty(path: PathBuf) -> Self {
+        Self {
+            path,
+            config: ModelProfilesConfig::default(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+}
+
 /// Machine-readable load state for a discovered config file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigFileStatus {
@@ -1067,6 +1123,200 @@ pub fn default_config_home() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claw")))
         .unwrap_or_else(|| PathBuf::from(".claw"))
+}
+
+#[must_use]
+pub fn model_profiles_path_from_env_or_default() -> PathBuf {
+    std::env::var_os(MODEL_PROFILES_ENV_VAR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL_PROFILES_PATH))
+}
+
+#[must_use]
+pub fn load_model_profiles_config() -> ModelProfilesLoadReport {
+    load_model_profiles_config_from_path(model_profiles_path_from_env_or_default())
+}
+
+#[must_use]
+pub fn load_model_profiles_config_from_path(path: impl Into<PathBuf>) -> ModelProfilesLoadReport {
+    let path = path.into();
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ModelProfilesLoadReport::empty(path);
+        }
+        Err(error) => {
+            let mut report = ModelProfilesLoadReport::empty(path);
+            report
+                .errors
+                .push(format!("model profiles: failed to read file: {error}"));
+            return report;
+        }
+    };
+
+    let value = match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(value) => value,
+        Err(error) => {
+            let mut report = ModelProfilesLoadReport::empty(path);
+            report
+                .errors
+                .push(format!("model profiles: invalid JSON: {error}"));
+            return report;
+        }
+    };
+
+    parse_model_profiles_value(path, &value)
+}
+
+fn parse_model_profiles_value(
+    path: PathBuf,
+    value: &serde_json::Value,
+) -> ModelProfilesLoadReport {
+    let mut report = ModelProfilesLoadReport::empty(path);
+    let Some(root) = value.as_object() else {
+        report
+            .errors
+            .push("model profiles: root must be a JSON object".to_string());
+        return report;
+    };
+
+    let version = root
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or(0);
+    report.config.version = version;
+    if version != 1 {
+        report
+            .errors
+            .push(format!("model profiles: version must be 1, got {version}"));
+    }
+
+    report.config.default_profile = root
+        .get("default_profile")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    let Some(profiles) = root.get("profiles") else {
+        return report;
+    };
+    let Some(profiles) = profiles.as_array() else {
+        report
+            .errors
+            .push("model profiles: profiles must be an array".to_string());
+        return report;
+    };
+
+    let mut names = HashSet::new();
+    for (index, profile_value) in profiles.iter().enumerate() {
+        match parse_model_profile(index, profile_value, &mut report.warnings) {
+            Ok(Some(profile)) => {
+                if !names.insert(profile.name.clone()) {
+                    report.errors.push(format!(
+                        "model profiles: duplicate profile name `{}`",
+                        profile.name
+                    ));
+                    continue;
+                }
+                report.config.profiles.push(profile);
+            }
+            Ok(None) => {}
+            Err(errors) => report.errors.extend(errors),
+        }
+    }
+
+    report
+}
+
+fn parse_model_profile(
+    index: usize,
+    value: &serde_json::Value,
+    warnings: &mut Vec<String>,
+) -> Result<Option<ModelProfile>, Vec<String>> {
+    let Some(object) = value.as_object() else {
+        return Err(vec![format!(
+            "model profiles: profile #{index} must be a JSON object"
+        )]);
+    };
+
+    let context = format!("model profiles: profile #{index}");
+    let name = required_trimmed_string(object, "name", &context);
+    let provider = required_trimmed_string(object, "provider", &context);
+    let model = required_trimmed_string(object, "model", &context);
+    let mut errors = Vec::new();
+    if let Err(error) = &name {
+        errors.push(error.clone());
+    }
+    if let Err(error) = &provider {
+        errors.push(error.clone());
+    }
+    if let Err(error) = &model {
+        errors.push(error.clone());
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    let provider = provider.expect("validated above");
+    if !is_known_model_profile_provider(&provider) {
+        warnings.push(format!(
+            "{context}: provider `{provider}` is not a known provider; keeping it for future/custom support"
+        ));
+    }
+
+    Ok(Some(ModelProfile {
+        name: name.expect("validated above"),
+        provider,
+        base_url: optional_trimmed_string(object, "base_url"),
+        api_key_env: optional_trimmed_string(object, "api_key_env"),
+        model: model.expect("validated above"),
+        description: optional_trimmed_string(object, "description"),
+        tags: optional_string_array_from_serde_value(object.get("tags")).unwrap_or_default(),
+    }))
+}
+
+fn required_trimmed_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    context: &str,
+) -> Result<String, String> {
+    optional_trimmed_string(object, key).ok_or_else(|| {
+        format!("{context}: missing required non-empty string field `{key}`")
+    })
+}
+
+fn optional_trimmed_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn optional_string_array_from_serde_value(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    let array = value?.as_array()?;
+    Some(
+        array
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    )
+}
+
+fn is_known_model_profile_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "openai-compatible" | "ollama" | "anthropic" | "xai"
+    )
 }
 
 /// Save provider settings to the user-level `~/.claw/settings.json`.
@@ -2526,9 +2776,11 @@ fn deep_merge_objects(
 #[cfg(test)]
 mod tests {
     use super::{
-        deep_merge_objects, parse_permission_mode_label, ConfigFileStatus, ConfigLoader,
-        ConfigSource, McpServerConfig, McpTransport, ResolvedPermissionMode, RuntimeFeatureConfig,
-        RuntimeHookCommand, RuntimeHookConfig, RuntimePluginConfig, CLAW_SETTINGS_SCHEMA_NAME,
+        deep_merge_objects, load_model_profiles_config_from_path,
+        model_profiles_path_from_env_or_default, parse_permission_mode_label, ConfigFileStatus,
+        ConfigLoader, ConfigSource, McpServerConfig, McpTransport, ResolvedPermissionMode,
+        RuntimeFeatureConfig, RuntimeHookCommand, RuntimeHookConfig, RuntimePluginConfig,
+        CLAW_SETTINGS_SCHEMA_NAME, MODEL_PROFILES_ENV_VAR,
     };
     use crate::json::JsonValue;
     use crate::sandbox::FilesystemIsolationMode;
@@ -2551,6 +2803,223 @@ mod tests {
         let pid = std::process::id();
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("runtime-config-{pid}-{nanos}-{seq}"))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn set_value(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn model_profiles_missing_file_returns_empty_config() {
+        let root = temp_dir();
+        let path = root.join("missing").join("profiles.json");
+
+        let report = load_model_profiles_config_from_path(&path);
+
+        assert_eq!(report.path, path);
+        assert_eq!(report.config.version, 1);
+        assert!(report.config.default_profile.is_none());
+        assert!(report.config.profiles.is_empty());
+        assert!(report.warnings.is_empty());
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn model_profiles_loads_valid_profiles_file() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("profiles.json");
+        fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "default_profile": "openrouter-qwen-coder",
+  "profiles": [
+    {
+      "name": "openrouter-qwen-coder",
+      "provider": "openai-compatible",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "CLAW_OPENROUTER_API_KEY",
+      "model": "openai/qwen/qwen3-coder:free",
+      "description": "Free OpenRouter coding model with tools",
+      "tags": ["cloud", "free", "tools", "coding"]
+    }
+  ]
+}"#,
+        )
+        .expect("write profiles");
+
+        let report = load_model_profiles_config_from_path(path);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.config.version, 1);
+        assert_eq!(
+            report.config.default_profile.as_deref(),
+            Some("openrouter-qwen-coder")
+        );
+        let profile = report
+            .config
+            .profiles
+            .first()
+            .expect("profile should load");
+        assert_eq!(profile.name, "openrouter-qwen-coder");
+        assert_eq!(profile.provider, "openai-compatible");
+        assert_eq!(profile.base_url.as_deref(), Some("https://openrouter.ai/api/v1"));
+        assert_eq!(profile.api_key_env.as_deref(), Some("CLAW_OPENROUTER_API_KEY"));
+        assert_eq!(profile.model, "openai/qwen/qwen3-coder:free");
+        assert_eq!(
+            profile.description.as_deref(),
+            Some("Free OpenRouter coding model with tools")
+        );
+        assert_eq!(
+            profile.tags,
+            vec![
+                "cloud".to_string(),
+                "free".to_string(),
+                "tools".to_string(),
+                "coding".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn model_profiles_invalid_json_is_recoverable() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("profiles.json");
+        fs::write(&path, "{ invalid json").expect("write invalid profiles");
+
+        let report = load_model_profiles_config_from_path(path);
+
+        assert!(report.has_errors());
+        assert!(report.config.profiles.is_empty());
+        assert!(report.errors.iter().any(|error| error.contains("invalid JSON")));
+    }
+
+    #[test]
+    fn model_profiles_duplicate_names_are_validation_errors() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("profiles.json");
+        fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "profiles": [
+    {"name":"same","provider":"ollama","model":"openai/qwen3:8b"},
+    {"name":"same","provider":"ollama","model":"openai/llama3.2:3b"}
+  ]
+}"#,
+        )
+        .expect("write profiles");
+
+        let report = load_model_profiles_config_from_path(path);
+
+        assert!(report.has_errors());
+        assert_eq!(report.config.profiles.len(), 1);
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate profile name `same`")));
+    }
+
+    #[test]
+    fn model_profiles_missing_required_fields_are_validation_errors() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("profiles.json");
+        fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "profiles": [
+    {"provider":"ollama","model":"openai/qwen3:8b"},
+    {"name":"missing-model","provider":"ollama"},
+    {"name":"missing-provider","model":"openai/qwen3:8b"}
+  ]
+}"#,
+        )
+        .expect("write profiles");
+
+        let report = load_model_profiles_config_from_path(path);
+
+        assert!(report.has_errors());
+        assert!(report.config.profiles.is_empty());
+        assert!(report.errors.iter().any(|error| error.contains("`name`")));
+        assert!(report.errors.iter().any(|error| error.contains("`model`")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("`provider`")));
+    }
+
+    #[test]
+    fn model_profiles_api_key_env_never_resolves_secret_value() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("profiles.json");
+        let _guard = EnvVarGuard::set_value("CLAW_TEST_SECRET_KEY", "super-secret-value");
+        fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "profiles": [
+    {
+      "name": "secret-safe",
+      "provider": "openai-compatible",
+      "api_key_env": "CLAW_TEST_SECRET_KEY",
+      "model": "openai/example"
+    }
+  ]
+}"#,
+        )
+        .expect("write profiles");
+
+        let report = load_model_profiles_config_from_path(path);
+
+        let profile = report
+            .config
+            .profiles
+            .first()
+            .expect("profile should load");
+        assert_eq!(profile.api_key_env.as_deref(), Some("CLAW_TEST_SECRET_KEY"));
+        let rendered = format!("{report:?}");
+        assert!(!rendered.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn model_profiles_env_override_selects_path() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("profiles.json");
+        let _guard = EnvVarGuard::set(MODEL_PROFILES_ENV_VAR, &path);
+
+        assert_eq!(model_profiles_path_from_env_or_default(), path);
     }
 
     #[test]
