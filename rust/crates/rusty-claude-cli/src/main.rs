@@ -14239,17 +14239,17 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  --output-format FORMAT  {}",
+        "  --output-format FORMAT     {}",
         cli_text("flag.output_format")
     )?;
     writeln!(
         out,
-        "                         {}",
+        "                              {}",
         cli_text("help.output_format_env")
     )?;
     writeln!(
         out,
-        "                         {}",
+        "                              {}",
         cli_text("help.log_env")
     )?;
     writeln!(
@@ -14269,17 +14269,13 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  --dangerously-skip-permissions  {}",
+        "  --dangerously-skip-permissions, --skip-permissions  {}",
         cli_text("flag.skip_permissions")
     )?;
     writeln!(
         out,
         "  --allowedTools TOOLS       {}",
         cli_text("flag.allowed_tools")
-    )?;
-    writeln!(
-        out,
-        "  --allowedTools TOOLS       Restrict enabled tools by canonical snake_case name or alias"
     )?;
     writeln!(out, "                              Examples: read, glob, web_fetch, WebFetch; status JSON exposes aliases")?;
     writeln!(

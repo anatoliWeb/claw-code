@@ -2628,7 +2628,7 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
         Some(args) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "{}: {args}.\n{}: list, show, help",
+                "{}: {args}.\n{}: list, show, create, help",
                 ui_text("agents.error.unknown_subcommand"),
                 ui_text("agents.label.supported")
             ),
@@ -2780,7 +2780,7 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
         Some(args) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "{}: {args}.\n{}: list, show, help",
+                "{}: {args}.\n{}: list, show, create, help",
                 ui_text("agents.error.unknown_subcommand"),
                 ui_text("agents.label.supported")
             )

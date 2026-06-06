@@ -47,6 +47,7 @@ fn main() {
     println!("cargo:rustc-env=GIT_COMMIT_TIMESTAMP={git_commit_timestamp}");
     println!("cargo:rustc-env=RUSTC_VERSION={rustc_version}");
 
+    // TARGET is always set by Cargo during build.
     let target = env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=TARGET={target}");
 
@@ -60,6 +61,7 @@ fn main() {
         });
     println!("cargo:rustc-env=BUILD_DATE={build_date}");
 
+    // Rerun if git state changes. Paths are relative to this package root.
     println!("cargo:rerun-if-changed=../../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../../.git/refs");
     println!("cargo:rerun-if-changed=../../../.git/index");
