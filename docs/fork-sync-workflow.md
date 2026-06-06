@@ -1,179 +1,171 @@
 # Fork sync workflow
 
-Цей документ описує безпечний порядок синхронізації fork `origin/main` з `upstream/main`.
-Мета: не втратити локальні коміти, не запустити повторний rebase випадково і не пушити стан,
-який ще не перевірений.
+Цей документ описує безпечну схему роботи з fork-гілками Claw Code.
+Головна ідея: `main` тримаємо як чисту sync-гілку для `upstream/main`, а щоденну роботу ведемо тільки в `claw-local`.
 
-## Перед будь-якими змінами
+## Branch roles
 
-Завжди починай з перевірки стану:
+- `upstream/main` - оригінальний Claw Code.
+- `origin/main` - `main` у моєму fork, який має бути максимально близький до `upstream/main`.
+- local `main` - локальна sync-гілка для оновлення з upstream.
+- `origin/claw-local` - моя робоча гілка у fork.
+- local `claw-local` - моя основна робоча гілка для доробок.
+
+Правила:
+
+- Щоденна робота тільки у `claw-local`.
+- `main` не використовувати для локальних доробок.
+- `main` оновлювати тільки з `upstream/main`.
+- Зміни з `main` підтягувати у `claw-local` через `git merge main`.
+
+## First-time setup
+
+Якщо `claw-local` ще не створена:
 
 ```powershell
-git status
-git branch -vv
-git rev-parse --abbrev-ref HEAD
-git log --oneline --decorate --graph --all -20
+git checkout main
+git pull origin main
+git checkout -b claw-local
+git push -u origin claw-local
 ```
 
-Якщо Git показує активний `rebase`, `merge`, `cherry-pick` або `bisect`, не запускай новий rebase.
-Спочатку треба завершити або скасувати активну операцію за явною згодою користувача.
+Якщо `claw-local` уже існує:
 
-## Що означають origin, upstream і local
+```powershell
+git fetch origin
+git checkout claw-local
+git pull
+```
 
-- `local main` - твоя локальна гілка `main`.
-- `origin/main` - твій fork на GitHub.
-- `upstream/main` - основний репозиторій Claw Code, з якого fork бере оновлення.
+## Daily work
 
-Зазвичай локальні зміни мають жити у `main`, потім пушитись в `origin/main`.
-Оновлення з основного проєкту приходять з `upstream/main`.
+```powershell
+git checkout claw-local
+git status
+git pull
+```
 
-## Коли rebase дозволений
+Після змін:
 
-Rebase на `upstream/main` можна робити тільки коли:
+```powershell
+git add .
+git commit -m "..."
+git push
+```
 
-- ти на гілці `main`;
-- `git status` показує clean working tree;
-- немає активного rebase/merge/cherry-pick/bisect;
-- ти вже зробив `git fetch upstream` і `git fetch origin`;
-- ти перевірив різницю через `--cherry-pick`;
-- є явна згода користувача на rebase.
-
-## Безпечний rebase
-
-Перевірити оновлення:
+## Check upstream updates safely
 
 ```powershell
 scripts/check-upstream-updates.ps1
 ```
 
-Якщо upstream має унікальні коміти і користувач дозволив rebase:
+Цей скрипт тільки перевіряє стан:
+
+- не робить merge;
+- не робить rebase;
+- не робить push;
+- не робить reset або clean.
+
+## Update main from upstream
 
 ```powershell
-git rebase upstream/main
-```
-
-Після rebase перевір:
-
-```powershell
+git checkout main
 git status
-git log --oneline --decorate --graph --all -20
-```
-
-Не запускай `git push --force-with-lease origin main`, доки не перевірено, що rebase завершений,
-working tree clean, і користувач явно дозволив push.
-
-## Коли НЕ робити rebase
-
-Не запускай rebase, якщо:
-
-- rebase вже активний;
-- є conflicts;
-- working tree dirty;
-- є untracked файли, які можуть бути перезаписані;
-- поточна гілка не `main`;
-- користувач просив тільки перевірити стан;
-- немає зрозумілого плану відновлення після конфлікту.
-
-## Як перевірити оновлення через --cherry-pick
-
-Оновити refs:
-
-```powershell
 git fetch upstream
-git fetch origin
+git merge --ff-only upstream/main
+git push origin main
 ```
 
-Порівняти `upstream/main` і `main`:
+Якщо `git merge --ff-only upstream/main` не проходить, не робити `merge --no-ff` автоматично.
+Зупинись і перевір, чи `main` не має локальних змін або зайвих комітів.
+
+## Bring upstream changes into claw-local
 
 ```powershell
-git log --oneline --decorate --graph --left-right --cherry-pick upstream/main...main
-git rev-list --count --cherry-pick --left-only upstream/main...main
-git rev-list --count --cherry-pick --right-only upstream/main...main
+git checkout claw-local
+git status
+git pull
+git merge main
+git push
 ```
 
-У цьому порівнянні:
+Для `claw-local` використовуємо `git merge main`, а не `git rebase upstream/main`.
+Так менше шансів повторити конфліктний rebase-лабіринт і легше бачити, де саме upstream зміни увійшли в локальну гілку.
 
-- `<` означає коміт тільки в `upstream/main`;
-- `>` означає коміт тільки в локальному `main`;
-- `--cherry-pick` прибирає patch-equivalent коміти, тобто коміти з різними SHA, але однаковими змінами.
+## Conflict handling during merge main
 
-Без `--cherry-pick` після rebase можна побачити оманливі дублікати: Git покаже різні SHA з обох боків,
-навіть якщо частина змін уже фактично застосована.
-
-## Як перевірити локальні коміти
-
-Показати коміти, які є тільки в локальному `main`:
-
-```powershell
-git log --oneline --decorate --graph --right-only --cherry-pick upstream/main...main
-```
-
-Порахувати їх:
-
-```powershell
-git rev-list --count --cherry-pick --right-only upstream/main...main
-```
-
-## Як безпечно push після rebase
-
-Push після rebase дозволений тільки якщо:
-
-- rebase завершений;
-- `git status` clean;
-- поточна гілка `main`;
-- `origin/main` перевірений через `git fetch origin`;
-- користувач явно дозволив push.
-
-Команда:
-
-```powershell
-git push --force-with-lease origin main
-```
-
-`--force-with-lease` безпечніший за `--force`, бо не перезапише чужі нові зміни в `origin/main`,
-якщо вони з'явилися після останнього fetch.
-
-## Заборонені команди без явного дозволу
-
-Не виконувати автоматично:
-
-```powershell
-git reset --hard
-git clean -fdx
-git rebase --skip
-git rebase --abort
-git push --force
-git push --force-with-lease origin main
-```
-
-`git rebase --abort` дозволений тільки коли користувач прямо попросив скасувати активний rebase
-або дав явну згоду на recovery.
-
-## Якщо випадково стартував повторний rebase
-
-1. Зупинись і не запускай `git rebase --continue` або `git rebase --skip`.
-2. Перевір стан:
+Спочатку перевір стан:
 
 ```powershell
 git status
-git branch -vv
-git rev-parse --abbrev-ref HEAD
-git log --oneline --decorate --graph --all -20
 ```
 
-3. Якщо користувач дозволив abort, виконай:
+Після ручного виправлення конфліктів:
+
+```powershell
+git add <resolved-files>
+git commit -m "Merge main into claw-local"
+git push
+```
+
+Якщо merge треба скасувати:
+
+```powershell
+git merge --abort
+```
+
+Роби це тільки якщо зрозумілі наслідки і є явна згода.
+
+## What not to do
+
+- Не робити `git rebase upstream/main` напряму у `claw-local`.
+- Не натискати GitHub "Discard commits".
+- Не робити `git reset --hard`.
+- Не робити `git clean -fdx`.
+- Не робити `git push --force` без окремого плану.
+- Не синхронізуватися, якщо working tree dirty.
+- Не синхронізуватися, якщо active rebase/merge/cherry-pick/bisect.
+
+## Recovery
+
+Якщо випадково запустили rebase:
+
+```powershell
+git status
+```
+
+Якщо це помилковий rebase і ми не хочемо його продовжувати:
 
 ```powershell
 git rebase --abort
 ```
 
-4. Якщо abort блокується untracked файлами, спочатку зроби backup цих файлів поза working tree.
-5. Після abort знову перевір:
+Після цього:
 
 ```powershell
 git status
 git branch -vv
-git log --oneline --decorate --graph -10
 ```
 
-6. Не пушити після recovery без окремої явної згоди користувача.
+Не роби `git rebase --continue`, `git rebase --skip`, `git reset --hard` або `git clean -fdx` без окремого рішення.
+
+## Full manual sync sequence
+
+```powershell
+git checkout claw-local
+git status
+git pull
+
+git checkout main
+git status
+git fetch upstream
+git merge --ff-only upstream/main
+git push origin main
+
+git checkout claw-local
+git status
+git merge main
+git push
+```
+
+Якщо на будь-якому кроці з'являються conflicts або dirty working tree, зупинись і спочатку розбери стан.

@@ -21,11 +21,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Do not overwrite existing `CLAUDE.md` content automatically; update it intentionally when repo workflows change.
 ## Fork sync safety
 
-Before syncing with upstream or rebasing this fork, read:
+This fork uses two important branches:
+
+- `main` - sync branch for `upstream/main`.
+- `claw-local` - local working branch with custom Claw Code changes.
+
+Before syncing, read:
 `docs/fork-sync-workflow.md`
+and:
+`docs/claw-local-workflow.md`
 
 Do not run `git rebase upstream/main` automatically.
-First run:
+
+Use:
 `scripts/check-upstream-updates.ps1`
 
-Never push, reset hard, clean, skip rebase commits, or discard commits without explicit user confirmation.
+Safe update flow:
+1. update `main` from `upstream/main`;
+2. merge `main` into `claw-local`;
+3. push `claw-local`.
+
+Never push, reset hard, clean, skip rebase commits, discard commits, or force-push without explicit user confirmation.
