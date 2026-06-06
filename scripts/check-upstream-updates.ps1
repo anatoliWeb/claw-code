@@ -24,16 +24,59 @@ function Test-GitRef {
     return $LASTEXITCODE -eq 0
 }
 
-function Get-Count {
-    param([string[]] $Args)
+function Invoke-GitLines {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]] $GitArgs
+    )
 
-    return ((& git @Args).Trim())
+    $output = & git @GitArgs 2>&1
+    $exitCode = $LASTEXITCODE
+
+    return @{
+        Ok = ($exitCode -eq 0)
+        Output = @($output)
+        ExitCode = $exitCode
+        Args = @($GitArgs)
+    }
 }
 
-function Show-Log {
-    param([string[]] $Args)
+function Get-GitCount {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]] $GitArgs
+    )
 
-    & git @Args
+    $result = Invoke-GitLines @GitArgs
+    if (-not $result.Ok) {
+        Write-Warning ("Git count command failed ({0}): {1}" -f $result.ExitCode, ($GitArgs -join " "))
+        return "unknown"
+    }
+
+    $line = @($result.Output | Where-Object { "$_" -match '^\d+$' } | Select-Object -First 1)
+    if (-not $line) {
+        Write-Warning ("Git count command did not return a numeric line: {0}" -f ($GitArgs -join " "))
+        return "unknown"
+    }
+
+    return [int]$line[0]
+}
+
+function Show-GitLog {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]] $GitArgs
+    )
+
+    $result = Invoke-GitLines @GitArgs
+    if (-not $result.Ok) {
+        Write-Warning ("Git log command failed ({0}): {1}" -f $result.ExitCode, ($GitArgs -join " "))
+        return
+    }
+
+    foreach ($line in $result.Output) {
+        Write-Host $line
+    }
 }
 
 $repoRoot = Get-RepoRoot
@@ -107,15 +150,15 @@ Write-Host "Git status"
 git status
 
 if ($hasUpstreamMain) {
-    $upstreamUnique = Get-Count @("rev-list", "--count", "--cherry-pick", "--left-only", "upstream/main...main")
-    $mainUnique = Get-Count @("rev-list", "--count", "--cherry-pick", "--right-only", "upstream/main...main")
+    $upstreamUnique = Get-GitCount "rev-list" "--count" "--cherry-pick" "--left-only" "upstream/main...main"
+    $mainUnique = Get-GitCount "rev-list" "--count" "--cherry-pick" "--right-only" "upstream/main...main"
 } else {
     $upstreamUnique = "unknown"
     $mainUnique = "unknown"
 }
 
-$clawLocalUnique = Get-Count @("rev-list", "--count", "main..claw-local")
-$mainNotInClawLocal = Get-Count @("rev-list", "--count", "claw-local..main")
+$clawLocalUnique = Get-GitCount "rev-list" "--count" "main..claw-local"
+$mainNotInClawLocal = Get-GitCount "rev-list" "--count" "claw-local..main"
 
 Write-Host ""
 Write-Host "Branch comparison"
@@ -127,24 +170,24 @@ Write-Host "Commits in main not in claw-local: $mainNotInClawLocal"
 if ($hasUpstreamMain) {
     Write-Host ""
     Write-Host "Upstream unique list"
-    Show-Log @("log", "--oneline", "--decorate", "--graph", "--left-only", "--cherry-pick", "upstream/main...main", "-20")
+    Show-GitLog "log" "--oneline" "--decorate" "--graph" "--left-only" "--cherry-pick" "upstream/main...main" "-20"
 
     Write-Host ""
     Write-Host "Local main unique list"
-    Show-Log @("log", "--oneline", "--decorate", "--graph", "--right-only", "--cherry-pick", "upstream/main...main", "-20")
+    Show-GitLog "log" "--oneline" "--decorate" "--graph" "--right-only" "--cherry-pick" "upstream/main...main" "-20"
 }
 
 Write-Host ""
 Write-Host "claw-local commits not in main"
-Show-Log @("log", "--oneline", "--decorate", "--graph", "main..claw-local", "-20")
+Show-GitLog "log" "--oneline" "--decorate" "--graph" "main..claw-local" "-20"
 
 Write-Host ""
 Write-Host "main commits not in claw-local"
-Show-Log @("log", "--oneline", "--decorate", "--graph", "claw-local..main", "-20")
+Show-GitLog "log" "--oneline" "--decorate" "--graph" "claw-local..main" "-20"
 
 Write-Host ""
 Write-Host "Next safe steps"
-if ($upstreamUnique -ne "unknown" -and [int]$upstreamUnique -gt 0) {
+if ($upstreamUnique -ne "unknown" -and $upstreamUnique -gt 0) {
     Write-Host "Upstream updates are available:"
     Write-Host "1. git checkout main"
     Write-Host "2. git merge --ff-only upstream/main"
@@ -156,7 +199,7 @@ if ($upstreamUnique -ne "unknown" -and [int]$upstreamUnique -gt 0) {
     Write-Host "No upstream update action needed."
 }
 
-if ([int]$mainNotInClawLocal -gt 0) {
+if ($mainNotInClawLocal -ne "unknown" -and $mainNotInClawLocal -gt 0) {
     Write-Host "Run: git checkout claw-local; git merge main"
 }
 
